@@ -17,7 +17,7 @@ jobs:
     env:
       BASE: ${{ github.event.inputs.target }}
     steps:
-      - name: OpenList version fingerprint (read-only)
+      - name: OpenList version fingerprint (read-only, deep)
         run: |
           python3 - <<'PYEOF'
           import urllib.request, ssl, re, os, json, hashlib, base64
@@ -42,74 +42,71 @@ jobs:
           def jd(b):
               try: return json.loads(b.decode('utf-8','replace'))
               except: return None
-          def sha256(b): return hashlib.sha256(b).hexdigest()
-          def md5(b): return hashlib.md5(b).hexdigest()
+          def sha(b): return hashlib.sha256(b).hexdigest()
 
           print("========== TARGET: %s ==========" % base)
-          print("MY_IP_CHECK:")
-          try:
-              r=urllib.request.urlopen("https://api.ipify.org", timeout=15, context=ctx).read().decode()
-              print("  relay_egress_ip=%s" % r)
-          except Exception as e:
-              print("  ipify_err=%s" % repr(e))
+          os.makedirs('out', exist_ok=True)
 
-          # 1) index page
+          # FULL index page
           s,h,b=fetch('GET','/')
           txt=b.decode('utf-8','replace')
-          print("\n===== INDEX (status=%s) =====" % s)
-          print("HEADERS:")
-          for k,v in h.items(): print("  %s: %s" % (k,v))
-          print("META/title:")
-          for m in re.findall(r'<meta[^>]+>', txt, re.I)[:30]: print("  %s" % m)
-          t=re.search(r'<title>(.*?)</title>', txt, re.S|re.I)
-          if t: print("  <title>%s</title>" % t.group(1).strip())
-          scripts=re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', txt, re.I)
-          print("SCRIPT_REFS(%d):" % len(scripts))
-          for sc in scripts: print("  %s" % sc)
+          open('out/index.html','w',encoding='utf-8').write(txt)
+          print("INDEX status=%s len=%d" % (s,len(b)))
 
-          # 2) download scripts -> hash + grep version
-          print("\n===== SCRIPT HASHES / VERSION GREP =====")
+          # ALL asset refs (scripts, module scripts, stylesheets, preload, links)
+          refs=[]
+          for m in re.finditer(r'(?:src|href)\s*=\s*["\']([^"\']+)["\']', txt, re.I):
+              refs.append(m.group(1))
+          # also type=module + crossorigin patterns
+          for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)', txt, re.I):
+              if m.group(1) not in refs: refs.append(m.group(1))
+          print("ALL_REFS(%d):" % len(refs))
+          for r in sorted(set(refs)): print("  %s" % r)
+
+          # fetch every ref
           alljs=bytearray()
-          for i,sc in enumerate(scripts):
-              u=urljoin(base+"/", sc)
+          for i,r in enumerate(sorted(set(refs))):
+              u=urljoin(base+"/", r)
               s2,h2,b2=fetch('GET', u.replace(base,''))
               if s2>=400 or not b2:
-                  print("  SKIP %s (status=%s len=%s)" % (u,s2,len(b2)))
-                  continue
-              alljs+=b2
-              print("  [%d] %s status=%s sha256=%s md5=%s len=%d" % (i,u,s2,sha256(b2)[:16],md5(b2)[:12],len(b2)))
+                  print("  SKIP %s (status=%s len=%s)" % (u,s2,len(b2))); continue
+              fn='out/asset_%02d%s' % (i, os.path.splitext(r)[1] or '.bin')
+              open(fn,'wb').write(b2)
+              if r.lower().endswith('.js'): alljs+=b2
+              print("  [%d] %s status=%s sha256=%s len=%d" % (i,u,s2,sha(b2)[:16],len(b2)))
 
-          # 3) /api/version (alist/openlist canonical)
-          print("\n===== /api/version =====")
-          for ep in ['/api/version','/api/public/settings','/api/me','/api/auth/login']:
-              s3,h3,b3=fetch('GET', ep)
-              d=jd(b3)
-              print("--- %s status=%s ---" % (ep,s3))
-              print(json.dumps(d, ensure_ascii=False)[:800] if d is not None else ("  raw=%r" % b3[:300]))
-              if ep=='/api/auth/login':
-                  # also try guest login to capture any version in payload
-                  s4,h4,b4=fetch('POST','/api/auth/login', body={'username':'guest','password':'guest'})
-                  d4=jd(b4)
-                  print("  guest_login status=%s" % s4)
-                  print("  guest_login_body=%s" % (json.dumps(d4, ensure_ascii=False)[:400] if d4 else repr(b4[:200])))
+          # FULL public settings (version may hide here? unlikely, but dump)
+          s3,h3,b3=fetch('GET','/api/public/settings')
+          d3=jd(b3)
+          print("\n===== PUBLIC SETTINGS keys =====")
+          if d3: print("  %s" % list(d3.get('data',{}).keys()))
+          # look for any version-ish value
+          if d3:
+              for k,v in d3.get('data',{}).items():
+                  vs=str(v)
+                  if re.search(r'\d+\.\d+', vs) and len(vs)<60:
+                      print("  setting %s=%r" % (k,v))
 
-          # 4) grep all captured JS for version fingerprints
+          # BROAD version grep on concatenated JS
           jst=alljs.decode('utf-8','replace')
-          print("\n===== VERSION FINGERPRINT GREP (in JS bundles) =====")
-          patterns={
-            'semver': r'\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?\b',
-            'version_kv': r'(?:version|VERSION|Version|appVersion|buildVersion|__VERSION__|APP_VERSION|VITE_APP_VERSION)\s*[:=]\s*["\'][^"\']{1,40}["\']',
-            'commit': r'(?:commit|COMMIT|commitId|gitHash|buildCommit)\s*[:=]\s*["\'][0-9a-f]{6,40}["\']',
-            'build_time': r'(?:buildTime|buildDate|BUILD_TIME|releaseDate)\s*[:=]\s*["\'][^"\']{4,40}["\']',
-            'openlist_brand': r'(?:OpenList|openlist|Alist|alist)[\s"\'/:]{0,4}\d+\.\d+',
-          }
-          for name,pat in patterns.items():
-              seen=set()
-              for m in re.findall(pat, jst):
-                  if isinstance(m,tuple): m=''.join(m)
-                  seen.add(m)
-              if seen:
-                  print("  [%s] %s" % (name, ' | '.join(sorted(seen)[:25])))
-          # also search HEAD of each script for banner comments
+          print("\n===== BROAD VERSION GREP (all JS, %d bytes) =====" % len(jst))
+          seen=set()
+          for m in re.findall(r'(?i)(?:openlist|alist|version|ver|vite|build|commit|hash|release)[^a-z0-9]{0,3}["\']?[:=]?\s*["\']?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?', jst):
+              seen.add(m)
+          for m in re.findall(r'\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?\b', jst):
+              seen.add(m)
+          print("CANDIDATE_VERSIONS:")
+          for v in sorted(seen)[:80]: print("  %s" % v)
+          # brand strings
+          for brand in ['OpenList','openlist','Alist','alist','oplist','VITE','RENDER_VERSION','window.__']:
+              cnt=jst.count(brand)
+              if cnt: print("  brand[%s] count=%d sample=%r" % (brand,cnt, (jst.find(brand)>=0 and jst[max(0,jst.find(brand)-20):jst.find(brand)+60])))
+          # explicit __VERSION__ / define injections
+          for m in re.findall(r'(window\.[A-Za-z_]+|globalThis\.[A-Za-z_]+)\s*=\s*["\'][^"\']{1,40}["\']', jst)[:0]:
+              print("  GLOBAL %s" % m)
+          # look for env-style version define
+          for m in re.findall(r'([A-Z_]{4,})\s*=\s*["\']([0-9][^"\']{0,30})["\']', jst)[:40]:
+              print("  DEFINE %s=%s" % m)
+
           print("\n===== DONE =====")
           PYEOF
