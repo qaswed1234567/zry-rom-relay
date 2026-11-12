@@ -17,68 +17,111 @@ jobs:
     env:
       BASE: ${{ github.event.inputs.target }}
     steps:
-      - name: OpenList version source v6 (trace About->endpoint)
+      - name: OpenList version source v7 (settings + About component)
         run: |
           python3 - <<'PYEOF'
-          import urllib.request, ssl, re, os
+          import urllib.request, ssl, re, os, json
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           base=os.environ['BASE'].rstrip('/')
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-          def fetch(path):
-              req=urllib.request.Request(base+path, headers={'User-Agent':UA})
+          def fetch(method, path, token=None, j=True):
+              req=urllib.request.Request(base+path, headers={'User-Agent':UA,'Accept':'application/json, text/plain, */*'})
+              if token: req.add_header('Authorization', token)
               try:
                   r=urllib.request.urlopen(req, timeout=30, context=ctx)
                   return r.status, r.read()
               except urllib.error.HTTPError as e:
                   return e.code, e.read()
 
-          # The About component usually lives in components chunk. Fetch it.
-          s,b=fetch('/assets/components-CV7_am9F.js')
-          allt=b.decode('utf-8','replace')
-          print("components len=",len(b))
+          # guest login to get JWT
+          s,b=fetch('POST','/api/auth/login', j=True)
+          # need json body
+          data=json.dumps({"username":"guest","password":"guest"}).encode()
+          req=urllib.request.Request(base+'/api/auth/login', data=data, headers={'User-Agent':UA,'Content-Type':'application/json'})
+          r=urllib.request.urlopen(req, timeout=30, context=ctx)
+          jr=json.loads(r.read())
+          tok=jr.get('data',{}).get('token')
+          print("guest token present:", bool(tok))
 
-          # Find how 'version' is obtained in an About-like context:
-          # typical: getSetting('version') or api.get('/api/...') then .version
-          # Search for 'version' near API call patterns
-          print("\n=== 'version' near api/request calls ===")
-          for m in re.finditer(r'.{0,30}(?:api|axios|request|get|fetch)\(.{0,60}version.{0,30}', allt, re.I):
-              print("  %r"%m.group(0)[:160])
-          # Search for a literal endpoint string followed later by version use
-          print("\n=== endpoints referencing version in path/query ===")
-          for m in re.finditer(r'`(/[^`]*version[^`]*)', allt):
-              print("  %r"%m.group(1)[:120])
-          for m in re.finditer(r'"/([^"]*version[^"]*)"', allt):
-              print("  %r"%m.group(1)[:120])
-          for m in re.finditer(r"'(/[^']*version[^']*)'", allt):
-              print("  %r"%m.group(1)[:120])
+          # full public settings
+          s2,b2=fetch('GET','/api/public/settings')
+          ps=json.loads(b2)
+          print("\n=== /api/public/settings: any key containing 'version'? ===")
+          def walk(o, path=''):
+              if isinstance(o, dict):
+                  for k,v in o.items():
+                      if 'version' in str(k).lower():
+                          print("  KEY=%s VAL=%r" % (path+'/'+str(k), str(v)[:200]))
+                      walk(v, path+'/'+str(k))
+              elif isinstance(o, list):
+                  for i,v in enumerate(o):
+                      walk(v, path+'['+str(i)+']')
+          walk(ps)
+          # also print all top-level setting items' key+value if it's a dict of settings
+          print("  top structure keys:", list(ps.keys())[:20] if isinstance(ps,dict) else type(ps))
+          if isinstance(ps, dict) and 'data' in ps:
+              d=ps['data']
+              print("  data type:", type(d))
+              if isinstance(d, dict):
+                  for k,v in d.items():
+                      if 'version' in str(k).lower():
+                          print("    data.KEY=%s VAL=%r" % (k, str(v)[:200]))
 
-          # The OpenList About page often uses getSetting('version') from public settings.
-          print("\n=== 'version' as getSetting/getSettingByKey arg ===")
-          for m in re.finditer(r'(?:getSetting|getSystemSetting|getSettingByKey)\([^)]*version[^)]*\)', allt, re.I):
-              print("  %r"%m.group(0)[:160])
-          # broad: version used as object key in a request/data object
-          print("\n=== 'version:' in request/data objects ===")
-          cnt=0
-          for m in re.finditer(r'\{[^}]{0,40}version:[^}]{0,40}\}', allt):
-              print("  %r"%m.group(0)[:160]); cnt+=1
-              if cnt>=10: break
+          # /api/me as guest
+          s3,b3=fetch('GET','/api/me', token=tok)
+          me=json.loads(b3)
+          print("\n=== /api/me (guest) version field? ===")
+          def walk2(o, path=''):
+              if isinstance(o, dict):
+                  for k,v in o.items():
+                      if 'version' in str(k).lower() or 'Version' in str(k):
+                          print("  KEY=%s VAL=%r" % (path+'/'+str(k), str(v)[:200]))
+                      walk2(v, path+'/'+str(k))
+              elif isinstance(o, list):
+                  for i,v in enumerate(o): walk2(v, path+'['+str(i)+']')
+          walk2(me)
+          print("  me keys:", list(me.keys()) if isinstance(me,dict) else type(me))
 
-          # Also check for '/api/version' exact string anywhere (maybe with different casing built dynamically)
-          print("\n=== '/api/version' exact ===")
-          print("  found:", '/api/version' in allt)
+          # Trace About component in components chunk
+          s4,b4=fetch('GET','/assets/components-CV7_am9F.js')
+          ct=b4.decode('utf-8','replace')
+          print("\n=== About component: search 'About' + version source ===")
+          # find occurrences of 'About' as component/route label
+          for m in re.finditer(r'.{0,15}About.{0,15}', ct):
+              seg=ct[max(0,m.start()-60):m.end()+80].replace('\n',' ')
+              if 'version' in seg.lower() or 'About' in seg:
+                  pass
+          # direct: find ".version" property reads in files that also mention About
+          idxs=[m.start() for m in re.finditer(r'version', ct, re.I)]
+          print("  total 'version' occurrences in components:", len(idxs))
 
-          # Now probe a battery of candidate backend version endpoints (GET, anon)
-          print("\n=== PROBE backend endpoints ===")
-          cands=['/api/version','/api/version/','/api/admin/version','/api/admin/setting/version',
-                 '/api/public/version','/api/setting/version','/api/about','/api/public/about',
-                 '/api/meta','/api/public/meta','/api/build','/version.json','/api/info',
-                 '/api/system/version','/api/me/version']
-          for ep in cands:
-              s2,b2=fetch(ep)
-              bo=b2.decode('utf-8','replace')
-              if bo and 'doctype' not in bo.lower() and '<html' not in bo.lower():
-                  print("  %-32s -> %s : %s" % (ep, s2, bo[:200]))
-              else:
-                  print("  %-32s -> %s (html/fallback)" % (ep, s2))
+          # The About page likely does: const resp = await getSetting(); this.version = resp.data.version
+          # Try known OpenList call: api.get('/api/admin/setting/list') OR getSetting()
+          for pat in [r'getSetting\(\)', r"get\('version'\)", r"getSettingByKey\(`?version`?\)",
+                      r"\.version\s*=\s*\w+\.data", r"data\.version", r"setting\.version",
+                      r"about", r"About"]:
+              ms=[m for m in re.finditer(pat, ct)]
+              if ms:
+                  print("  pattern %r hits=%d" % (pat, len(ms)))
+                  for m in ms[:3]:
+                      print("     ctx: %r" % ct[max(0,m.start()-50):m.end()+70].replace('\n',' '))
+
+          # Also try admin setting list with guest token to see if it leaks anything
+          s5,b5=fetch('GET','/api/admin/setting/list', token=tok)
+          print("\n=== /api/admin/setting/list with GUEST token: status=%s ===" % s5)
+          if s5==200:
+              try:
+                  jj=json.loads(b5); 
+                  def w(o,p=''):
+                      if isinstance(o,dict):
+                          for k,v in o.items():
+                              if 'version' in str(k).lower(): print("    KEY=%s VAL=%r"%(p+'/'+str(k),str(v)[:200]))
+                              w(v,p+'/'+str(k))
+                      elif isinstance(o,list):
+                          for v in o: w(v,p)
+                  w(jj)
+              except Exception as e: print("    parse err", e)
+          else:
+              print("    body:", b5.decode('utf-8','replace')[:120])
           print("\nDONE")
           PYEOF
