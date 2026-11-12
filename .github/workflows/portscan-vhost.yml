@@ -28,8 +28,9 @@ jobs:
           mkdir -p out
           echo "TARGET=$T"
           # Full 1-65535 SYN scan with version detection on open ports
-          nmap -Pn -n -T4 -sS -sV --version-intensity 4 -p 1-65535 \
+          sudo nmap -Pn -n -T4 -sS -sV --version-intensity 4 -p 1-65535 \
                --reason --open -oX out/nmap.xml -oG out/nmap.gnmap "$T"
+          sudo chmod -R a+rw out
           echo "=== OPEN PORTS (nmap grepable) ==="
           grep -E "^(#|Host)" out/nmap.gnmap || true
           grep -v "^#" out/nmap.gnmap | awk -F'\t' 'NF>0{print}' || true
