@@ -1,0 +1,152 @@
+name: i2103-slider-solve
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Solve X-Rom-Human slider with realistic trajectory
+        continue-on-error: true
+        run: |
+          mkdir -p out
+          echo "START-B: python block entered" > out/solve_log.txt
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, re, os, base64, random, math, traceback
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE='https://zryflash.cn'
+          def log(m):
+              with open('out/solve_log.txt','a',encoding='utf-8') as f: f.write(m+'\n')
+              print(m)
+          def call(method, path, body=None, token=None, human=None, extra=None):
+              url=BASE+path; data=None
+              h={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36','Accept':'application/json, text/plain, */*','Origin':'https://zryflash.cn','Referer':'https://zryflash.cn/rom/'}
+              if token: h['X-Rom-Token']=token
+              if human: h['X-Rom-Human']=human
+              if extra: h.update(extra)
+              if body is not None:
+                  data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return -1, {}, ('ERR:'+repr(e)).encode()
+          def save(name, status, headers, body, cap=120000):
+              try:
+                  with open('out/%s.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                      f.write('STATUS %s\n'%status)
+                      for k,v in headers.items(): f.write('%s: %s\n'%(k,v))
+                  txt=body.decode('utf-8','replace')
+                  with open('out/%s.body.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                      f.write(txt[:cap])
+              except Exception as ex:
+                  log('save err %s %s'%(name,ex))
+              return (status,headers,body)
+          try:
+              # token
+              s,h,b=call('GET','/web-api/rom/token')
+              log('token endpoint status=%s len=%d'%(s,len(b)))
+              save('token',s,h,b)
+              try: tok=json.loads(b.decode())['token']
+              except Exception as e: tok=None; log('token parse err '+repr(e)+' body='+b[:200].decode('utf-8','replace'))
+              log('token='+(tok[:40] if tok else None))
+
+              def gen_track(offset, dur_ms, n, seed):
+                  random.seed(seed)
+                  pts=[]; raw_t=[0.0]
+                  TRACK_Y=60.0
+                  for i in range(1, n+1):
+                      p=i/n
+                      e=p*p*(3-2*p)                      # smoothstep: accel then decel
+                      x=e*offset
+                      # small vertical jitter around track, plus a gentle arch (human hand not perfectly flat)
+                      y=round(TRACK_Y + math.sin(math.pi*p)*1.5 + random.uniform(-1.8,1.8), 1)
+                      speed=0.55+0.9*math.sin(math.pi*p)  # velocity profile low->high->low
+                      dt=(dur_ms/n)*speed*(1+random.uniform(-0.18,0.18))
+                      raw_t.append(raw_t[-1]+max(dt,0.8))
+                      pts.append({'x':round(x,1),'y':y,'l':round(x,1),'isTrusted':True,'pointerType':'mouse'})
+                  # small overshoot + correction at the end (human always slightly overshoots)
+                  ov=random.uniform(1.0,2.5)
+                  pts.append({'x':round(offset+ov,1),'y':round(TRACK_Y+random.uniform(-1,1),1),'l':round(offset+ov,1),'isTrusted':True,'pointerType':'mouse'})
+                  raw_t.append(raw_t[-1]+random.uniform(40,120))
+                  # correction back to exact offset
+                  pts.append({'x':round(offset,1),'y':round(TRACK_Y,1),'l':round(offset,1),'isTrusted':True,'pointerType':'mouse'})
+                  raw_t.append(raw_t[-1]+random.uniform(60,160))
+                  total=raw_t[-1]; scale=dur_ms/max(total,1e-6)
+                  for i in range(len(pts)): pts[i]['t']=round(raw_t[i]*scale,1)
+                  pts[-1]['x']=round(offset,1); pts[-1]['l']=round(offset,1); pts[-1]['t']=round(dur_ms,1)
+                  return pts
+
+              human=None; vid=None; detail=[]
+              variants=[(2400,60),(3000,85),(2100,55),(2800,75),(3300,95),(2500,65)]
+              for cap_try in range(6):
+                  s,h,b=call('GET','/web-api/rom/captcha')
+                  try: c=json.loads(b.decode())
+                  except Exception as e: log('captcha parse err '+repr(e)+' '+b[:200].decode('utf-8','replace')); continue
+                  vid=c.get('id'); svg=c.get('image','')
+                  if svg.startswith('data:image/svg+xml;base64,'):
+                      try: svg=base64.b64decode(svg.split(',',1)[1]).decode('utf-8','replace')
+                      except: pass
+                  rects=re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\bwidth="42"[^>]*\brx="8"',svg)
+                  if not rects: rects=re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"',svg)
+                  # fallback: last rect with rx=8
+                  if not rects:
+                      allrx=re.findall(r'<rect[^>]*\brx="8"[^>]*>',svg)
+                      for rg in allrx:
+                          m=re.search(r'\bx="([\d.]+)"',rg); 
+                          if m: rects.append(m.group(1))
+                  gap_x=float(rects[0]) if rects else 216.0
+                  log('captcha id=%s gap_x=%s rects=%s'%(vid,gap_x,rects[:4]))
+                  save('captcha_%d'%cap_try,s,h,b)
+                  broke=False
+                  for (dur,n) in variants:
+                      for off_tweak in [0.0, -2.0, 2.0]:
+                          off=round(gap_x+off_tweak,1)
+                          pts=gen_track(off,dur,n,seed=cap_try*1000+variants.index((dur,n))*10+int(off_tweak))
+                          vbody={'id':vid,'offset':off,'duration':dur,'points':pts}
+                          vs,vh,vb=call('POST','/web-api/rom/verify',body=vbody)
+                          try: vd=json.loads(vb.decode())
+                          except: vd={}
+                          ok=vd.get('ok'); msg=vd.get('message'); ht=vd.get('humanToken'); rem=vd.get('remaining')
+                          human=ht if ht else human
+                          line='cap=%d dur=%s n=%s off=%.1f ok=%s msg=%s rem=%s'%(cap_try,dur,n,off,ok,msg,rem)
+                          detail.append(line); log('  '+line)
+                          save('verify_%d_%d_%d_%d'%(cap_try,dur,n,int(off_tweak)),vs,vh,vb)
+                          if ok and ht: broke=True; break
+                          if rem==0: broke=True; break
+                      if broke: break
+                  if human: break
+              with open('out/slider_detail.txt','w',encoding='utf-8') as f: f.write('\n'.join(detail))
+              if human:
+                  log('HUMAN TOKEN OBTAINED -> '+human)
+                  with open('out/human_token.txt','w',encoding='utf-8') as f: f.write(human)
+                  link_body={'brand':'小米','name':'小米15','model':'24129PN74C','region':'CN','version':'OS2.0.0'}
+                  ls,lh,lb=call('POST','/web-api/rom/link',body=link_body,human=human)
+                  save('link',ls,lh,lb)
+                  log('link resp: '+lb.decode('utf-8','replace')[:600])
+                  if tok:
+                      for p in ['/rom/','/zryroot/','/web-api/rom/meta','/web-api/rom/models?view=cards']:
+                          st,hh,bb=call('GET',p,token=tok,human=human)
+                          save('auth_'+re.sub(r'[^A-Za-z0-9]','_',p),st,hh,bb)
+                          log('authed GET %s -> status=%s len=%d'%(p,st,len(bb)))
+              else:
+                  log('NO HUMAN TOKEN: all trajectories rejected')
+          except Exception as e:
+              log('FATAL '+repr(e)); traceback.print_exc()
+          log('=== DONE ===')
+          PYEOF
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: i2103-slider
+          path: out/
+          if-no-files-found: warn
