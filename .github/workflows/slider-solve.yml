@@ -11,7 +11,7 @@ jobs:
   solve:
     runs-on: ubuntu-latest
     steps:
-      - name: Solve X-Rom-Human slider with realistic trajectory
+      - name: Solve X-Rom-Human slider with realistic physics-integrated trajectory
         continue-on-error: true
         run: |
           mkdir -p out
@@ -50,44 +50,92 @@ jobs:
               except Exception as ex:
                   log('save err %s %s'%(name,ex))
               return (status,headers,body)
+
+          def gen_track(target, seed, style):
+              random.seed(seed)
+              pts=[]
+              yb=60.0
+              t=0.0
+              def jy(): return round(yb + random.uniform(-0.9,0.9),1)
+              def add(x,y,tim):
+                  # ensure monotonic time
+                  nonlocal t
+                  t = max(tim, t+1.0)
+                  pts.append({'x':round(max(x,0.0),1),'y':round(y,1),'t':round(t,1)})
+              # initial settle at x=0
+              add(0.0, jy(), random.uniform(10,40))
+              add(0.0, jy(), t+random.uniform(20,80))
+              # tiny pre-jitter (humans often wiggle before committing)
+              if style.get('prejitter'):
+                  add(-random.uniform(1.0,3.5), jy(), t+random.uniform(15,50))
+                  add(0.0, jy(), t+random.uniform(15,50))
+              x=0.0
+              vmax = style.get('vmax', random.uniform(0.16,0.28))
+              overshoot = style.get('overshoot', random.uniform(4.0,9.0))
+              peak_p = style.get('peak_p', random.uniform(0.55,0.75))
+              n_pause = style.get('n_pause', random.randint(0,2))
+              pauses_done=0
+              target_end = target + overshoot
+              guard=0
+              while x < target_end - 0.3 and guard < 3000:
+                  guard+=1
+                  p = min(x/max(target,1e-6), 1.0)
+                  if p <= 1.0:
+                      base = (p**1.35) * ((1.0-p)**0.8)
+                  else:
+                      base = 0.04
+                  base = max(0.04, base)
+                  v = vmax * base * random.uniform(0.65,1.4)
+                  v = max(v, 0.018)
+                  dt = random.uniform(6,18)
+                  if pauses_done < n_pause and random.random()<0.10:
+                      dt += random.uniform(30,95); pauses_done+=1
+                  dx = v*dt
+                  x += dx
+                  pre=x
+                  add(x, jy(), t+dt)
+                  # occasional tiny backward jitter (human micro-correction)
+                  if random.random()<0.06 and len(pts)>3:
+                      back=random.uniform(0.4,1.6)
+                      x=max(0.0, x-back)
+                      add(x, jy(), t+random.uniform(8,22))
+              # overshoot apex
+              x_peak = target + overshoot
+              add(x_peak, jy(), t+random.uniform(25,80))
+              # correction back to exact target (decreasing steps)
+              cur=x_peak
+              cguard=0
+              while cur > target + 0.25 and cguard < 300:
+                  cguard+=1
+                  step = random.uniform(0.8, min(3.0, cur-target))
+                  cur -= step
+                  add(max(cur,target), jy(), t+random.uniform(12,45))
+              add(target, jy(), t+random.uniform(10,40))
+              add(target, jy(), t+random.uniform(20,60))
+              # finalize fields
+              for p in pts:
+                  p['isTrusted']=True; p['pointerType']='mouse'; p['l']=p['x']
+                  p['pressure']=0; p['tiltX']=0; p['tiltY']=0; p['width']=1; p['height']=1
+              return pts, round(t,1)
+
           try:
-              # token
               s,h,b=call('GET','/web-api/rom/token')
               log('token endpoint status=%s len=%d'%(s,len(b)))
               save('token',s,h,b)
               try: tok=json.loads(b.decode())['token']
-              except Exception as e: tok=None; log('token parse err '+repr(e)+' body='+b[:200].decode('utf-8','replace'))
-              log('token='+(tok[:40] if tok else None))
+              except Exception as e: tok=None; log('token parse err '+repr(e))
+              log('token='+(tok[:40] if tok else str(tok)))
 
-              def gen_track(offset, dur_ms, n, seed):
-                  random.seed(seed)
-                  pts=[]; raw_t=[0.0]
-                  TRACK_Y=60.0
-                  for i in range(1, n+1):
-                      p=i/n
-                      e=p*p*(3-2*p)                      # smoothstep: accel then decel
-                      x=e*offset
-                      # small vertical jitter around track, plus a gentle arch (human hand not perfectly flat)
-                      y=round(TRACK_Y + math.sin(math.pi*p)*1.5 + random.uniform(-1.8,1.8), 1)
-                      speed=0.55+0.9*math.sin(math.pi*p)  # velocity profile low->high->low
-                      dt=(dur_ms/n)*speed*(1+random.uniform(-0.18,0.18))
-                      raw_t.append(raw_t[-1]+max(dt,0.8))
-                      pts.append({'x':round(x,1),'y':y,'l':round(x,1),'isTrusted':True,'pointerType':'mouse'})
-                  # small overshoot + correction at the end (human always slightly overshoots)
-                  ov=random.uniform(1.0,2.5)
-                  pts.append({'x':round(offset+ov,1),'y':round(TRACK_Y+random.uniform(-1,1),1),'l':round(offset+ov,1),'isTrusted':True,'pointerType':'mouse'})
-                  raw_t.append(raw_t[-1]+random.uniform(40,120))
-                  # correction back to exact offset
-                  pts.append({'x':round(offset,1),'y':round(TRACK_Y,1),'l':round(offset,1),'isTrusted':True,'pointerType':'mouse'})
-                  raw_t.append(raw_t[-1]+random.uniform(60,160))
-                  total=raw_t[-1]; scale=dur_ms/max(total,1e-6)
-                  for i in range(len(pts)): pts[i]['t']=round(raw_t[i]*scale,1)
-                  pts[-1]['x']=round(offset,1); pts[-1]['l']=round(offset,1); pts[-1]['t']=round(dur_ms,1)
-                  return pts
-
-              human=None; vid=None; detail=[]
-              variants=[(2400,60),(3000,85),(2100,55),(2800,75),(3300,95),(2500,65)]
-              for cap_try in range(6):
+              human=None; detail=[]; got_msg={}
+              # diverse style profiles
+              styles=[
+                  {'prejitter':True,'overshoot':random.uniform(4,9),'peak_p':random.uniform(0.55,0.72),'n_pause':random.randint(0,2),'vmax':random.uniform(0.16,0.24)},
+                  {'prejitter':False,'overshoot':random.uniform(5,9),'peak_p':random.uniform(0.6,0.75),'n_pause':random.randint(1,2),'vmax':random.uniform(0.2,0.28)},
+                  {'prejitter':True,'overshoot':random.uniform(3,6),'peak_p':random.uniform(0.58,0.7),'n_pause':0,'vmax':random.uniform(0.18,0.26)},
+                  {'prejitter':False,'overshoot':random.uniform(6,10),'peak_p':random.uniform(0.62,0.76),'n_pause':random.randint(0,1),'vmax':random.uniform(0.15,0.22)},
+              ]
+              durations=[1500,2000,2400,2800,3200,3600,1800,2600]
+              for cap_try in range(8):
                   s,h,b=call('GET','/web-api/rom/captcha')
                   try: c=json.loads(b.decode())
                   except Exception as e: log('captcha parse err '+repr(e)+' '+b[:200].decode('utf-8','replace')); continue
@@ -95,36 +143,42 @@ jobs:
                   if svg.startswith('data:image/svg+xml;base64,'):
                       try: svg=base64.b64decode(svg.split(',',1)[1]).decode('utf-8','replace')
                       except: pass
-                  rects=re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\bwidth="42"[^>]*\brx="8"',svg)
-                  if not rects: rects=re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"',svg)
-                  # fallback: last rect with rx=8
-                  if not rects:
-                      allrx=re.findall(r'<rect[^>]*\brx="8"[^>]*>',svg)
-                      for rg in allrx:
-                          m=re.search(r'\bx="([\d.]+)"',rg); 
-                          if m: rects.append(m.group(1))
-                  gap_x=float(rects[0]) if rects else 216.0
-                  log('captcha id=%s gap_x=%s rects=%s'%(vid,gap_x,rects[:4]))
+                  rects=re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"',svg)
+                  if not rects: rects=re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\brx="8"',svg)
+                  gap_x=float(rects[0]) if rects else 200.0
+                  log('captcha id=%s gap_x=%s'%(vid,gap_x))
                   save('captcha_%d'%cap_try,s,h,b)
                   broke=False
-                  for (dur,n) in variants:
-                      for off_tweak in [0.0, -2.0, 2.0]:
-                          off=round(gap_x+off_tweak,1)
-                          pts=gen_track(off,dur,n,seed=cap_try*1000+variants.index((dur,n))*10+int(off_tweak))
-                          vbody={'id':vid,'offset':off,'duration':dur,'points':pts}
+                  for si,style in enumerate(styles):
+                      for dur in durations:
+                          off=round(gap_x + random.uniform(-1.0,1.0),1)
+                          pts,total=gen_track(off, seed=cap_try*100000+si*1000+int(dur), style=style)
+                          nlen=len(pts)
+                          # normalize total duration to dur
+                          scale=dur/max(total,1e-6)
+                          for p in pts: p['t']=round(p['t']*scale,1)
+                          # re-ensure monotonic after scaling
+                          for i in range(1,len(pts)):
+                              if pts[i]['t']<=pts[i-1]['t']: pts[i]['t']=pts[i-1]['t']+1.0
+                          pts[-1]['x']=round(off,1); pts[-1]['l']=round(off,1); pts[-1]['t']=dur
+                          vbody={'id':vid,'offset':off,'duration':dur,'points':pts,'trackWidth':300,'sliderWidth':42}
                           vs,vh,vb=call('POST','/web-api/rom/verify',body=vbody)
                           try: vd=json.loads(vb.decode())
                           except: vd={}
                           ok=vd.get('ok'); msg=vd.get('message'); ht=vd.get('humanToken'); rem=vd.get('remaining')
                           human=ht if ht else human
-                          line='cap=%d dur=%s n=%s off=%.1f ok=%s msg=%s rem=%s'%(cap_try,dur,n,off,ok,msg,rem)
+                          line='cap=%d si=%d dur=%s npts=%d off=%.1f ok=%s msg=%s rem=%s'%(cap_try,si,dur,nlen,off,ok,msg,rem)
                           detail.append(line); log('  '+line)
-                          save('verify_%d_%d_%d_%d'%(cap_try,dur,n,int(off_tweak)),vs,vh,vb)
+                          save('verify_%d_%d_%d'%(cap_try,si,dur),vs,vh,vb)
+                          if msg: got_msg[msg]=got_msg.get(msg,0)+1
                           if ok and ht: broke=True; break
                           if rem==0: broke=True; break
                       if broke: break
                   if human: break
-              with open('out/slider_detail.txt','w',encoding='utf-8') as f: f.write('\n'.join(detail))
+              with open('out/slider_detail.txt','w',encoding='utf-8') as f:
+                  f.write('\n'.join(detail))
+              with open('out/messages_seen.txt','w',encoding='utf-8') as f:
+                  f.write(json.dumps(got_msg,ensure_ascii=False))
               if human:
                   log('HUMAN TOKEN OBTAINED -> '+human)
                   with open('out/human_token.txt','w',encoding='utf-8') as f: f.write(human)
@@ -138,7 +192,7 @@ jobs:
                           save('auth_'+re.sub(r'[^A-Za-z0-9]','_',p),st,hh,bb)
                           log('authed GET %s -> status=%s len=%d'%(p,st,len(bb)))
               else:
-                  log('NO HUMAN TOKEN: all trajectories rejected')
+                  log('NO HUMAN TOKEN: all trajectories rejected. messages_seen=%s'%got_msg)
           except Exception as e:
               log('FATAL '+repr(e)); traceback.print_exc()
           log('=== DONE ===')
