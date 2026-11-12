@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: zryroot recon + realistic slider solve
+        continue-on-error: true
         run: |
-          set -e
           mkdir -p out
           python3 - <<'PYEOF'
-          import urllib.request, ssl, json, re, os, base64, random, math
+          import urllib.request, ssl, json, re, os, base64, random, math, traceback
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           BASE='https://zryflash.cn'
           def call(method, path, body=None, token=None, human=None, extra=None):
@@ -33,98 +33,124 @@ jobs:
                   return r.status, dict(r.getheaders()), r.read()
               except urllib.error.HTTPError as e:
                   return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return -1, {}, ('ERR:'+repr(e)).encode()
           def save(name, status, headers, body, cap=80000):
-              with open('out/%s.txt'%name,'w',encoding='utf-8',errors='replace') as f:
-                  f.write('STATUS %s\n'%status)
-                  for k,v in headers.items(): f.write('%s: %s\n'%(k,v))
-              txt=body.decode('utf-8','replace')
-              with open('out/%s.body.txt'%name,'w',encoding='utf-8',errors='replace') as f:
-                  f.write(txt[:cap])
-              print('%-30s status=%s len=%d'%(name,status,len(body)))
-              return txt
+              try:
+                  with open('out/%s.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                      f.write('STATUS %s\n'%status)
+                      for k,v in headers.items(): f.write('%s: %s\n'%(k,v))
+                  txt=body.decode('utf-8','replace')
+                  with open('out/%s.body.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                      f.write(txt[:cap])
+                  print('%-30s status=%s len=%d'%(name,status,len(body)))
+              except Exception as ex:
+                  print('save err',name,ex)
+              return (status,headers,body)
+          try:
+              # ============ PART A: /zryroot/ recon ============
+              s,h,b=call('GET','/zryroot/'); html=b.decode('utf-8','replace')
+              print('zryroot status=%s len=%d'%(s,len(b)))
+              with open('out/zryroot_html.body.txt','w',encoding='utf-8',errors='replace') as f: f.write(html[:80000])
+              with open('out/zryroot_html.txt','w',encoding='utf-8') as f:
+                  f.write('STATUS %s\n'%s)
+                  for k,v in h.items(): f.write('%s: %s\n'%(k,v))
+              srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html)
+              hrefs = re.findall(r'<link[^>]+href=["\']([^"\']+)["\']', html)
+              def absurl(u):
+                  if u.startswith('data:'): return None
+                  if u.startswith('http'): return u
+                  if u.startswith('//'): return 'https:'+u
+                  if u.startswith('/'): return BASE+u
+                  return BASE+'/zryroot/'+u
+              cnt=0
+              for u in srcs+hrefs:
+                  u2=absurl(u)
+                  if not u2: continue
+                  base=re.sub(r'[^A-Za-z0-9._-]','_', re.sub(r'.*/','',u2.split('?')[0]))[:55]
+                  st,hh,bb=call('GET', u2.replace(BASE,''))
+                  txt=bb.decode('utf-8','replace')
+                  with open('out/zryasset_%s.body.txt'%base,'w',encoding='utf-8',errors='replace') as f: f.write(txt[:80000])
+                  cnt+=1
+              forms = re.findall(r'<form.*?</form>', html, re.S)
+              inputs = re.findall(r'<input[^>]*>', html)
+              with open('out/zryroot_notes.txt','w',encoding='utf-8') as f:
+                  f.write('SCRIPTS (%d):\n'%len(srcs)+'\n'.join(srcs)+'\n\nLINKS (%d):\n'%len(hrefs)+'\n'.join(hrefs))
+                  f.write('\n\nFORMS count=%d\n'%len(forms))
+                  for fm in forms: f.write('\n---FORM---\n'+fm+'\n')
+                  f.write('\n---INPUTS (%d)---\n'%len(inputs)+'\n'.join(inputs)+'\n')
+              print('PART A done: assets=%d forms=%d inputs=%d'%(cnt,len(forms),len(inputs)))
 
-          # ============ PART A: /zryroot/ recon ============
-          html = save('zryroot_html', *call('GET','/zryroot/'))
-          srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html)
-          hrefs = re.findall(r'<link[^>]+href=["\']([^"\']+)["\']', html)
-          def absurl(u):
-              if u.startswith('data:'): return None
-              if u.startswith('http'): return u
-              if u.startswith('//'): return 'https:'+u
-              if u.startswith('/'): return BASE+u
-              return BASE+'/zryroot/'+u
-          for u in srcs+hrefs:
-              u2=absurl(u)
-              if not u2: continue
-              base=re.sub(r'[^A-Za-z0-9._-]','_', re.sub(r'.*/','',u2.split('?')[0]))[:60]
-              save('zryasset_'+base, *call('GET', u2.replace(BASE,'')))
-          forms = re.findall(r'<form.*?</form>', html, re.S)
-          inputs = re.findall(r'<input[^>]*>', html)
-          with open('out/zryroot_notes.txt','w',encoding='utf-8') as f:
-              f.write('SCRIPTS (%d):\n'%len(srcs)+'\n'.join(srcs)+'\n\nLINKS (%d):\n'%len(hrefs)+'\n'.join(hrefs))
-              f.write('\n\nFORMS count=%d\n'%len(forms))
-              for fm in forms: f.write('\n---FORM---\n'+fm+'\n')
-              f.write('\n---INPUTS (%d)---\n'%len(inputs)+'\n'.join(inputs)+'\n')
+              # ============ PART B: realistic slider solve ============
+              s,h,b=call('GET','/web-api/rom/token')
+              try: tok=json.loads(b.decode())['token']
+              except Exception as e: tok=None; print('token parse err',e, b[:200])
+              print('token=',(tok[:40] if tok else None))
 
-          # ============ PART B: realistic slider solve ============
-          t_txt = save('token', *call('GET','/web-api/rom/token'))
-          tok = json.loads(t_txt)['token']
+              def gen_track(offset, dur_ms, n, seed):
+                  random.seed(seed); pts=[]; raw_t=[0.0]; x_prev=0.0
+                  for i in range(1, n+1):
+                      p=i/n
+                      e=p*p*(3-2*p)
+                      x=e*offset
+                      y=round(60+random.uniform(-2.5,2.5),1)
+                      speed=0.6+0.8*math.sin(math.pi*p)
+                      dt=(dur_ms/n)*speed*(1+random.uniform(-0.15,0.15))
+                      raw_t.append(raw_t[-1]+max(dt,1.0))
+                      pts.append({'x':round(x,1),'y':y,'l':round(x,1),'isTrusted':True,'pointerType':'mouse'})
+                  total=raw_t[-1]; scale=dur_ms/max(total,1e-6)
+                  for i in range(n+1): pts[i]['t']=round(raw_t[i]*scale,1)
+                  pts[-1]['x']=round(offset,1); pts[-1]['l']=round(offset,1); pts[-1]['t']=round(dur_ms,1)
+                  return pts
 
-          def gen_track(offset, dur_ms, n, seed):
-              random.seed(seed)
-              pts=[]; raw_t=[0.0]
-              for i in range(1, n+1):
-                  p=i/n
-                  e=p*p*(3-2*p)           # smoothstep: slow->fast->slow (human accel/decel)
-                  x=e*offset
-                  y=round(60+random.uniform(-2.5,2.5),1)   # slight vertical jitter
-                  speed=0.6+0.8*math.sin(math.pi*p)        # velocity profile
-                  dt=(dur_ms/n)*speed*(1+random.uniform(-0.15,0.15))
-                  raw_t.append(raw_t[-1]+dt)
-                  pts.append({'x':round(x,1),'y':y,'l':round(x,1),'isTrusted':True,'pointerType':'mouse'})
-              total=raw_t[-1]; scale=dur_ms/total
-              for i in range(n+1):
-                  pts[i]['t']=round(raw_t[i]*scale,1)
-              pts[-1]['x']=round(offset,1); pts[-1]['l']=round(offset,1); pts[-1]['t']=round(dur_ms,1)
-              return pts
-
-          human=None; vid=None
-          variants=[(2400,60),(3000,80),(2100,55),(2800,72),(3300,90),(2500,64)]
-          for cap_try in range(4):
-              c_txt=save('captcha_%d'%cap_try, *call('GET','/web-api/rom/captcha'))
-              c=json.loads(c_txt); vid=c.get('id'); svg=c.get('image','')
-              if svg.startswith('data:image/svg+xml;base64,'):
-                  svg=base64.b64decode(svg.split(',',1)[1]).decode('utf-8','replace')
-              rects=re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\bwidth="42"[^>]*\brx="8"',svg)
-              if not rects: rects=re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"',svg)
-              gap_x=float(rects[0]) if rects else 216.0
-              print('captcha id=%s gap_x=%s'%(vid,gap_x))
-              broke=False
-              for (dur,n) in variants:
-                  pts=gen_track(gap_x,dur,n,seed=cap_try*1000+variants.index((dur,n)))
-                  vbody={'id':vid,'offset':round(gap_x,1),'duration':dur,'points':pts}
-                  v_txt=save('verify_%d_%d_%d'%(cap_try,dur,n), *call('POST','/web-api/rom/verify',body=vbody))
-                  try: vd=json.loads(v_txt)
-                  except: vd={}
-                  ok=vd.get('ok'); msg=vd.get('message'); human=vd.get('humanToken')
-                  rem=vd.get('remaining')
-                  print('  dur=%s n=%s ok=%s msg=%s remaining=%s human=%s'%(dur,n,ok,msg,rem,(human[:24] if human else None)))
-                  if ok and human: broke=True; break
-                  if rem==0: broke=True; break
-              if human: break
-
-          if human:
-              print('HUMAN TOKEN OBTAINED -> '+human[:30]+'...')
-              link_body={'brand':'小米','name':'小米15','model':'24129PN74C','region':'CN','version':'OS2.0.0'}
-              l_txt=save('link', *call('POST','/web-api/rom/link',body=link_body,human=human))
-              print('link resp:', l_txt[:600])
-              z2=save('zryroot_with_human', *call('GET','/zryroot/',token=tok,human=human))
-          else:
-              print('NO HUMAN TOKEN: all trajectories rejected')
-          print('=== DONE ==='); 
+              human=None; vid=None; detail=[]
+              variants=[(2400,60),(3000,80),(2100,55),(2800,72),(3300,90),(2500,64)]
+              for cap_try in range(4):
+                  s,h,b=call('GET','/web-api/rom/captcha'); 
+                  try: c=json.loads(b.decode())
+                  except Exception as e: print('captcha parse err',e,b[:200]); continue
+                  vid=c.get('id'); svg=c.get('image','')
+                  if svg.startswith('data:image/svg+xml;base64,'):
+                      try: svg=base64.b64decode(svg.split(',',1)[1]).decode('utf-8','replace')
+                      except: pass
+                  rects=re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\bwidth="42"[^>]*\brx="8"',svg)
+                  if not rects: rects=re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"',svg)
+                  gap_x=float(rects[0]) if rects else 216.0
+                  print('captcha id=%s gap_x=%s'%(vid,gap_x))
+                  broke=False
+                  for (dur,n) in variants:
+                      pts=gen_track(gap_x,dur,n,seed=cap_try*1000+variants.index((dur,n)))
+                      vbody={'id':vid,'offset':round(gap_x,1),'duration':dur,'points':pts}
+                      vs,vh,vb=call('POST','/web-api/rom/verify',body=vbody)
+                      try: vd=json.loads(vb.decode())
+                      except: vd={}
+                      ok=vd.get('ok'); msg=vd.get('message'); ht=vd.get('humanToken'); rem=vd.get('remaining')
+                      human=ht if ht else human
+                      detail.append('cap=%d dur=%s n=%s ok=%s msg=%s rem=%s'%(cap_try,dur,n,ok,msg,rem))
+                      print('  dur=%s n=%s ok=%s msg=%s remaining=%s human=%s'%(dur,n,ok,msg,rem,(ht[:20] if ht else None)))
+                      if ok and ht: broke=True; break
+                      if rem==0: broke=True; break
+                  if human: break
+              with open('out/slider_detail.txt','w',encoding='utf-8') as f: f.write('\n'.join(detail))
+              if human:
+                  print('HUMAN TOKEN OBTAINED -> '+human[:30]+'...')
+                  link_body={'brand':'小米','name':'小米15','model':'24129PN74C','region':'CN','version':'OS2.0.0'}
+                  ls,lh,lb=call('POST','/web-api/rom/link',body=link_body,human=human)
+                  txt=lb.decode('utf-8','replace')
+                  with open('out/link.body.txt','w',encoding='utf-8',errors='replace') as f: f.write(txt[:600])
+                  print('link resp:', txt[:600])
+                  if tok:
+                      s2,h2,b2=call('GET','/zryroot/',token=tok,human=human)
+                      with open('out/zryroot_with_human.body.txt','w',encoding='utf-8',errors='replace') as f: f.write(b2.decode('utf-8','replace')[:80000])
+                      print('zryroot with human status=%s'%s2)
+              else:
+                  print('NO HUMAN TOKEN: all trajectories rejected')
+          except Exception as e:
+              print('FATAL', e); traceback.print_exc()
+          print('=== DONE ===')
           PYEOF
-          echo "=== SUMMARY ==="; ls -la out/
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: i2103-recon
