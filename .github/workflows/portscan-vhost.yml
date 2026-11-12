@@ -65,7 +65,7 @@ jobs:
                       with ctx.wrap_socket(s, server_hostname=host) as ss:
                           cert = ss.getpeercert(binary_form=False)
                       san = cert.get('subjectAltName', [])
-                          return san
+                      return san
               except Exception as e:
                   return [("ERR", str(e))]
 
