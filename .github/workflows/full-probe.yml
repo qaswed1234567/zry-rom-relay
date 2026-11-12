@@ -1,0 +1,99 @@
+name: zry-full-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Full auth-flow probe (token -> data -> human solve -> link)
+        run: |
+          set -e
+          mkdir -p out3
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, re, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE='https://zryflash.cn'
+          def call(method, path, body=None, token=None, human=None):
+              url=BASE+path
+              data=None
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json','Origin':'https://zryflash.cn','Referer':'https://zryflash.cn/rom/'}
+              if token: h['X-Rom-Token']=token
+              if human: h['X-Rom-Human']=human
+              if body is not None:
+                  data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+          def save(name, status, headers, body):
+              with open('out3/%s.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                  f.write('STATUS %s\n'%status)
+                  for k,v in headers.items(): f.write('%s: %s\n'%(k,v))
+              txt=body.decode('utf-8','replace')
+              with open('out3/%s.body.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                  f.write(txt[:25000])
+              print('%-22s status=%s len=%d'%(name,status,len(body)))
+              return txt
+
+          # 1) get token (unauthenticated)
+          t_txt = save('01_token', *call('GET','/web-api/rom/token'))
+          tok = json.loads(t_txt)['token']
+          print('  token=', tok[:40], '...')
+
+          # 2) meta WITH token
+          save('02_meta', *call('GET','/web-api/rom/meta', token=tok))
+          # 3) models WITH token
+          save('03_models', *call('GET','/web-api/rom/models?view=cards', token=tok))
+
+          # 4) captcha -> parse target gap x from SVG
+          c_txt = save('04_captcha', *call('GET','/web-api/rom/captcha'))
+          c = json.loads(c_txt)
+          cap_id = c.get('id')
+          svg = c.get('image','')
+          if svg.startswith('data:image/svg+xml;base64,'):
+              import base64
+              svg = base64.b64decode(svg.split(',',1)[1]).decode('utf-8','replace')
+          # target rect = the rounded rect (rx) that is the puzzle gap; take its x
+          rects = re.findall(r'<rect[^>]*\bx="([\d.]+)"[^>]*\bwidth="42"[^>]*\brx="8"', svg)
+          if not rects:
+              rects = re.findall(r'<rect[^>]*\brx="8"[^>]*\bx="([\d.]+)"', svg)
+          gap_x = float(rects[0]) if rects else 216
+          print('  captcha id=%s gap_x=%s'%(cap_id, gap_x))
+
+          # 5) verify with derived offset (piece left = gap_x), plausible human timing
+          offset = gap_x
+          verify_body = {"id":cap_id,"offset":offset,"duration":2400,
+                         "points":[{"x":int(offset),"y":60,"t":0,"l":int(offset),"isTrusted":True,"pointerType":"mouse"},
+                                    {"x":int(offset),"y":60,"t":2400,"l":int(offset),"isTrusted":True,"pointerType":"mouse"}]}
+          v_txt = save('05_verify', *call('POST','/web-api/rom/verify', body=verify_body))
+          human = None
+          try:
+              vd = json.loads(v_txt)
+              human = vd.get('humanToken')
+              print('  humanToken=', (human[:40]+'...') if human else None, '| ok=', vd.get('ok'), '| msg=', vd.get('message'))
+          except Exception as e:
+              print('  verify parse err', e)
+
+          # 6) link (needs human) with a sample package payload
+          if human:
+              link_body = {"brand":"小米","name":"小米15","model":"24129PN74C","region":"CN","version":"OS2.0.0"}
+              l_txt = save('06_link', *call('POST','/web-api/rom/link', body=link_body, human=human))
+              print('  link resp:', l_txt[:300])
+          else:
+              print('  skip link (no human token)')
+          PYEOF
+          echo "=== SUMMARY ==="; ls -la out3/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zry-full-probe
+          path: out3/
+          if-no-files-found: warn
