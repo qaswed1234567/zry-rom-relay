@@ -1,0 +1,30 @@
+name: duck-toolbox-exe-fetch
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'base url'
+        required: false
+        default: 'https://yazinb.icu'
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download duck-toolbox-1.1.3.exe
+        run: |
+          set -e
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          mkdir -p out
+          curl -sk -A "$UA" -o out/duck-toolbox-1.1.3.exe "$BASE/dl/duck-toolbox-1.1.3.exe"
+          echo "exe bytes: $(wc -c < out/duck-toolbox-1.1.3.exe)"
+          file out/duck-toolbox-1.1.3.exe
+          sha256sum out/duck-toolbox-1.1.3.exe
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: duck-toolbox-exe
+          path: out/duck-toolbox-1.1.3.exe
+          if-no-files-found: error
