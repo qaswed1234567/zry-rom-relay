@@ -1,0 +1,86 @@
+name: target-vhost80-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target IP'
+        required: false
+        default: '119.28.135.153'
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: :80 Host-header differential probe
+        run: |
+          T="${{ github.event.inputs.target }}"
+          mkdir -p out
+          python3 - <<'PYEOF'
+          import socket, re
+          T = "${{ github.event.inputs.target }}"
+          cands = ["yazinb.icu","pan.yazinb.icu","www.yazinb.icu","admin.yazinb.icu","api.yazinb.icu",
+                   "console.yazinb.icu","dev.yazinb.icu","test.yazinb.icu","internal.yazinb.icu",
+                   "open.yazinb.icu","openlist.yazinb.icu","file.yazinb.icu","dl.yazinb.icu",
+                   "git.yazinb.icu","jenkins.yazinb.icu","grafana.yazinb.icu","boss.yazinb.icu",
+                   "cloud.yazinb.icu","web.yazinb.icu","vpn.yazinb.icu","m.yazinb.icu",
+                   "status.yazinb.icu","docs.yazinb.icu","auth.yazinb.icu","sso.yazinb.icu"]
+          base=None
+          lines=[]
+          print("=== HTTP :80 vhost responses (Host header differential) ===")
+          for h in cands:
+              try:
+                  with socket.create_connection((T,80), timeout=10) as s:
+                      req="GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"%h
+                      s.sendall(req.encode())
+                      resp=b""
+                      while True:
+                          d=s.recv(4096)
+                          if not d: break
+                          resp+=d
+                  rs=resp.decode('utf-8','replace')
+                  m=re.search(r'HTTP/\d\.\d (\d+)', rs)
+                  st=m.group(1) if m else "?"
+                  lm=re.search(r'Location:\s*(\S+)', rs, re.I)
+                  loc=lm.group(1) if lm else ""
+                  tm=re.search(r'<title>(.*?)</title>', rs, re.I|re.S)
+                  ti=tm.group(1).strip()[:80] if tm else ""
+                  print("  %-28s status=%s len=%d title=%r loc=%s"%(h,st,len(resp),ti,loc))
+                  lines.append("%s\t%s\t%d\t%s\t%s"%(h,st,len(resp),ti,loc))
+                  if h=="yazinb.icu": base=(st,len(resp),ti)
+              except Exception as e:
+                  print("  %-28s ERR %s"%(h,str(e)[:60]))
+                  lines.append("%s\tERR\t0\t\t%s"%(h,str(e)[:60]))
+          print("\n=== DIFF vs base yazinb.icu ===")
+          diff=False
+          for h,st,ln,ti,loc in [x.split("\t") for x in lines]:
+              if h in ("yazinb.icu","pan.yazinb.icu"): continue
+              if st not in ("ERR",) and (base is None or ln!=base[1] or st!=base[0] or ti!=base[2]):
+                  print("  DIFF %-28s status=%s len=%s title=%r loc=%s"%(h,st,ln,ti,loc)); diff=True
+          if not diff:
+              print("  (no HTTP :80 Host-header diffs; all candidates == base or errored)")
+          with open('out/vhost80_responses.txt','w',encoding='utf-8',errors='replace') as f:
+              for x in lines: f.write(x+"\n")
+          print("wrote out/vhost80_responses.txt")
+          PYEOF
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-vhost80-probe
+          path: out/
+          if-no-files-found: warn
+      - name: Publish
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "# :80 vhost probe ${{ github.event.inputs.target }}"
+            echo '```'; cat out/vhost80_responses.txt 2>/dev/null; echo '```'
+          } > report.md
+          gh issue create --title "vhost80 probe" --body "$(cat report.md)" || true
