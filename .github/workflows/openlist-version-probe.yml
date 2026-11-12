@@ -17,111 +17,85 @@ jobs:
     env:
       BASE: ${{ github.event.inputs.target }}
     steps:
-      - name: OpenList version source v7 (settings + About component)
+      - name: OpenList version source v8 (raw dumps + grep)
         run: |
           python3 - <<'PYEOF'
           import urllib.request, ssl, re, os, json
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           base=os.environ['BASE'].rstrip('/')
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-          def fetch(method, path, token=None, j=True):
-              req=urllib.request.Request(base+path, headers={'User-Agent':UA,'Accept':'application/json, text/plain, */*'})
-              if token: req.add_header('Authorization', token)
+          def fetch(method, path, token=None, body=None):
+              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None: data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(base+path, data=data, headers=h, method=method)
               try:
                   r=urllib.request.urlopen(req, timeout=30, context=ctx)
-                  return r.status, r.read()
+                  return r.status, dict(r.getheaders()), r.read()
               except urllib.error.HTTPError as e:
-                  return e.code, e.read()
+                  return e.code, dict(e.headers), e.read()
 
-          # guest login to get JWT
-          s,b=fetch('POST','/api/auth/login', j=True)
-          # need json body
-          data=json.dumps({"username":"guest","password":"guest"}).encode()
-          req=urllib.request.Request(base+'/api/auth/login', data=data, headers={'User-Agent':UA,'Content-Type':'application/json'})
-          r=urllib.request.urlopen(req, timeout=30, context=ctx)
-          jr=json.loads(r.read())
-          tok=jr.get('data',{}).get('token')
-          print("guest token present:", bool(tok))
+          # guest login
+          s,b=fetch('POST','/api/auth/login', body={"username":"guest","password":"guest"})
+          tok=json.loads(b).get('data',{}).get('token')
+          print("guest token:", bool(tok))
 
-          # full public settings
-          s2,b2=fetch('GET','/api/public/settings')
-          ps=json.loads(b2)
-          print("\n=== /api/public/settings: any key containing 'version'? ===")
-          def walk(o, path=''):
-              if isinstance(o, dict):
-                  for k,v in o.items():
-                      if 'version' in str(k).lower():
-                          print("  KEY=%s VAL=%r" % (path+'/'+str(k), str(v)[:200]))
-                      walk(v, path+'/'+str(k))
-              elif isinstance(o, list):
-                  for i,v in enumerate(o):
-                      walk(v, path+'['+str(i)+']')
-          walk(ps)
-          # also print all top-level setting items' key+value if it's a dict of settings
-          print("  top structure keys:", list(ps.keys())[:20] if isinstance(ps,dict) else type(ps))
-          if isinstance(ps, dict) and 'data' in ps:
-              d=ps['data']
-              print("  data type:", type(d))
-              if isinstance(d, dict):
-                  for k,v in d.items():
-                      if 'version' in str(k).lower():
-                          print("    data.KEY=%s VAL=%r" % (k, str(v)[:200]))
+          os.makedirs('out', exist_ok=True)
 
-          # /api/me as guest
-          s3,b3=fetch('GET','/api/me', token=tok)
-          me=json.loads(b3)
-          print("\n=== /api/me (guest) version field? ===")
-          def walk2(o, path=''):
-              if isinstance(o, dict):
-                  for k,v in o.items():
-                      if 'version' in str(k).lower() or 'Version' in str(k):
-                          print("  KEY=%s VAL=%r" % (path+'/'+str(k), str(v)[:200]))
-                      walk2(v, path+'/'+str(k))
-              elif isinstance(o, list):
-                  for i,v in enumerate(o): walk2(v, path+'['+str(i)+']')
-          walk2(me)
-          print("  me keys:", list(me.keys()) if isinstance(me,dict) else type(me))
+          # 1) raw index.html
+          s1,h1,b1=fetch('GET','/')
+          idx=b1.decode('utf-8','replace')
+          open('out/index.html','w').write(idx)
+          print("\n=== index.html: lines containing 'version' (ci) ===")
+          for ln in idx.split('\n'):
+              if 'version' in ln.lower() or 'OPENLIST_CONFIG' in ln or 'OPENLIST' in ln:
+                  print("  %s" % ln.strip()[:300])
+          # full OPENLIST_CONFIG object
+          m=re.search(r'window\.OPENLIST_CONFIG\s*=\s*(\{[^;]*\})', idx, re.S)
+          if m: print("\nOPENLIST_CONFIG =", m.group(1)[:600])
 
-          # Trace About component in components chunk
-          s4,b4=fetch('GET','/assets/components-CV7_am9F.js')
-          ct=b4.decode('utf-8','replace')
-          print("\n=== About component: search 'About' + version source ===")
-          # find occurrences of 'About' as component/route label
-          for m in re.finditer(r'.{0,15}About.{0,15}', ct):
-              seg=ct[max(0,m.start()-60):m.end()+80].replace('\n',' ')
-              if 'version' in seg.lower() or 'About' in seg:
-                  pass
-          # direct: find ".version" property reads in files that also mention About
-          idxs=[m.start() for m in re.finditer(r'version', ct, re.I)]
-          print("  total 'version' occurrences in components:", len(idxs))
+          # 2) public settings raw
+          s2,h2,b2=fetch('GET','/api/public/settings')
+          ps=b2.decode('utf-8','replace')
+          open('out/public_settings.json','w').write(ps)
+          print("\n=== /api/public/settings: 'version' substrings ===")
+          for mm in re.finditer(r'.{0,30}version.{0,40}', ps, re.I):
+              print("  %r" % mm.group(0)[:120])
 
-          # The About page likely does: const resp = await getSetting(); this.version = resp.data.version
-          # Try known OpenList call: api.get('/api/admin/setting/list') OR getSetting()
-          for pat in [r'getSetting\(\)', r"get\('version'\)", r"getSettingByKey\(`?version`?\)",
-                      r"\.version\s*=\s*\w+\.data", r"data\.version", r"setting\.version",
-                      r"about", r"About"]:
-              ms=[m for m in re.finditer(pat, ct)]
-              if ms:
-                  print("  pattern %r hits=%d" % (pat, len(ms)))
-                  for m in ms[:3]:
-                      print("     ctx: %r" % ct[max(0,m.start()-50):m.end()+70].replace('\n',' '))
+          # 3) admin setting list with guest token
+          s3,h3,b3=fetch('GET','/api/admin/setting/list', token=tok)
+          ad=b3.decode('utf-8','replace')
+          open('out/admin_setting_list.json','w').write(ad)
+          print("\n=== /api/admin/setting/list (guest) status=%s len=%d ===" % (s3,len(ad)))
+          print("=== version substrings ===")
+          for mm in re.finditer(r'.{0,30}version.{0,40}', ad, re.I):
+              print("  %r" % mm.group(0)[:120])
+          # also find key named version-ish
+          try:
+              j=json.loads(ad)
+              def findver(o, p=''):
+                  res=[]
+                  if isinstance(o,dict):
+                      for k,v in o.items():
+                          if 'version' in str(k).lower():
+                              res.append("%s=%s"%(p+'/'+str(k), str(v)[:200]))
+                          res+=findver(v,p+'/'+str(k))
+                  elif isinstance(o,list):
+                      for v in o: res+=findver(v,p)
+                  return res
+              vv=findver(j)
+              if vv: print("  KEYS-WITH-version:", vv[:20])
+              else: print("  no key named version found")
+          except Exception as e:
+              print("  parse err:", e)
 
-          # Also try admin setting list with guest token to see if it leaks anything
-          s5,b5=fetch('GET','/api/admin/setting/list', token=tok)
-          print("\n=== /api/admin/setting/list with GUEST token: status=%s ===" % s5)
-          if s5==200:
-              try:
-                  jj=json.loads(b5); 
-                  def w(o,p=''):
-                      if isinstance(o,dict):
-                          for k,v in o.items():
-                              if 'version' in str(k).lower(): print("    KEY=%s VAL=%r"%(p+'/'+str(k),str(v)[:200]))
-                              w(v,p+'/'+str(k))
-                      elif isinstance(o,list):
-                          for v in o: w(v,p)
-                  w(jj)
-              except Exception as e: print("    parse err", e)
-          else:
-              print("    body:", b5.decode('utf-8','replace')[:120])
+          # 4) /api/me
+          s4,h4,b4=fetch('GET','/api/me', token=tok)
+          me=b4.decode('utf-8','replace')
+          print("\n=== /api/me (guest): version substrings ===")
+          for mm in re.finditer(r'.{0,30}version.{0,40}', me, re.I):
+              print("  %r" % mm.group(0)[:120])
+
           print("\nDONE")
           PYEOF
