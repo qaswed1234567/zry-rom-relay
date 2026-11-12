@@ -32,9 +32,9 @@ jobs:
               req=urllib.request.Request(base+path, data=data, headers=h, method=method)
               try:
                   r=urllib.request.urlopen(req, timeout=30, context=ctx)
-                  return r.status, dict(r.getheaders()), r.read()
+                  return r.status, r.read()
               except urllib.error.HTTPError as e:
-                  return e.code, dict(e.headers), e.read()
+                  return e.code, e.read()
 
           # guest login
           s,b=fetch('POST','/api/auth/login', body={"username":"guest","password":"guest"})
