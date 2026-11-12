@@ -1,0 +1,74 @@
+name: openlist-version3
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: Enumerate version-leak endpoints (guest + unauth)
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, re
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          base=os.environ['BASE'].rstrip('/')
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          def fetch(method, path, token=None, body=None):
+              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None: data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(base+path, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  return r.status, r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read()
+          # guest login
+          s,b=fetch('POST','/api/auth/login', body={"username":"guest","password":"guest"})
+          tok=json.loads(b).get('data',{}).get('token')
+          print("guest login:", s, "token?", bool(tok))
+          # candidate version endpoints (unauth + guest)
+          cands = ['/api/version', '/version', '/api/admin/setting/get?key=version',
+                   '/api/admin/setting/list', '/api/public/settings', '/api/me',
+                   '/api/other/version', '/version.txt', '/api/setting/version']
+          for c in cands:
+              st,bb = fetch('GET', c, token=(tok if c.startswith('/api/admin') or c=='/api/me' else None))
+              body = bb.decode('utf-8','replace')
+              print("--- %s -> HTTP %s len=%d ---" % (c, st, len(body)))
+              # show version-ish substrings
+              hits=[mm.group(0) for mm in re.finditer(r'.{0,15}version.{0,30}', body, re.I)]
+              if hits:
+                  for hh in hits[:5]: print("    VERSION-HIT: %r" % hh[:120])
+              else:
+                  print("    body[:160]:", body[:160].replace('\n',' '))
+          # frontend index.html: look for version markers
+          s1,b1=fetch('GET','/')
+          idx=b1.decode('utf-8','replace')
+          for m in re.finditer(r'.{0,20}(openlist|alist).{0,40}', idx, re.I):
+              print("INDEX marker:", m.group(0)[:120])
+          for m in re.finditer(r'window\.\w*[Vv]ersion\w*\s*=', idx):
+              print("INDEX winver:", idx[m.start():m.start()+80])
+          # grab main app js and grep for semver + version
+          ms=re.findall(r'(?:src|href)="(/assets/[^"]+\.js)"', idx)
+          for js in ms[:4]:
+              sj,bj=fetch('GET', js)
+              jt=bj.decode('utf-8','replace')
+              vers=re.findall(r'(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.]+)?)', jt)
+              vv=list(set(versions := vers))[:10]
+              # also look for version near openlist
+              near=[mm.group(0) for mm in re.finditer(r'.{0,10}(?:openlist|alist).{0,25}version.{0,25}', jt, re.I)][:3]
+              print("JS %s: semver_count=%d sample=%s near=%s" % (js, len(vers), vv, near))
+          print("DONE")
+          PYEOF
