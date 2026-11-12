@@ -17,85 +17,65 @@ jobs:
     env:
       BASE: ${{ github.event.inputs.target }}
     steps:
-      - name: OpenList version fingerprint v4 (all JS chunks)
+      - name: OpenList version probe v5 (context + about + entries)
         run: |
           python3 - <<'PYEOF'
           import urllib.request, ssl, re, os, json
-          from urllib.parse import urljoin
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           base=os.environ['BASE'].rstrip('/')
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-          def fetch(method, path, body=None, token=None):
-              url=base+path
-              h={'User-Agent':UA,'Accept':'application/json, text/plain, */*','Content-Type':'application/json','Origin':base,'Referer':base+'/'}
-              if token: h['Authorization']=token
-              data=None
-              if body is not None: data=json.dumps(body).encode()
-              req=urllib.request.Request(url, data=data, headers=h, method=method)
+          def fetch(path):
+              req=urllib.request.Request(base+path, headers={'User-Agent':UA})
               try:
                   r=urllib.request.urlopen(req, timeout=30, context=ctx)
-                  return r.status, dict(r.getheaders()), r.read()
+                  return r.status, r.read()
               except urllib.error.HTTPError as e:
-                  return e.code, dict(e.headers), e.read()
-              except Exception as e:
-                  return -1, {}, ('ERR:'+repr(e)).encode()
+                  return e.code, e.read()
+          def ctx_of(text, kw, before=60, after=80, limit=8):
+              out=[]
+              for m in re.finditer(re.escape(kw), text):
+                  out.append(text[max(0,m.start()-before):m.start()+after].replace('\n',' '))
+                  if len(out)>=limit: break
+              return out
 
-          print("========== TARGET: %s ==========" % base)
-          os.makedirs('out', exist_ok=True)
-          s,h,b=fetch('GET','/')
-          txt=b.decode('utf-8','replace')
+          # fetch entry + libs
+          chunks={'index':'/assets/index-PvGPvlUv.js','lib':'/assets/lib-fvlc89Ul.js',
+                  'store':'/assets/store-BxFvGRq4.js','tb':'/assets/tb-RbDNyT4E.js',
+                  'components':'/assets/components-CV7_am9F.js'}
+          txts={}
+          for name,url in chunks.items():
+              s,b=fetch(url)
+              txts[name]=b.decode('utf-8','replace')
+              print("FETCHED %s status=%s len=%d" % (url,s,len(b)))
 
-          # collect ALL asset URLs from the HTML (preloads + legacy + module entry)
-          assets=set()
-          for m in re.finditer(r'/(?:assets|brand)/[A-Za-z0-9_.\-]+\.(?:js|css)', txt):
-              assets.add(m.group(0))
-          # also the module entry script
-          for m in re.finditer(r'src="(/assets/[^"]+\.js)"', txt):
-              assets.add(m.group(1))
-          for m in re.finditer(r'href="(/assets/[^"]+\.css)"', txt):
-              assets.add(m.group(1))
-          print("ASSETS_FOUND(%d):" % len(assets))
-          for a in sorted(assets): print("  %s" % a)
+          allt='\n'.join(txts.values())
 
-          alljs=bytearray()
-          jsmap={}
-          for a in sorted(assets):
-              if not a.endswith('.js'): continue
-              s2,h2,b2=fetch('GET', a)
-              if s2>=400 or not b2:
-                  print("  SKIP %s status=%s" % (a,s2)); continue
-              fn='out'+a.replace('/','_')
-              open(fn,'wb').write(b2)
-              jsmap[a]=b2.decode('utf-8','replace')
-              alljs+=b2
-              print("  FETCHED %s len=%d" % (a,len(b2)))
+          print("\n=== context around '3.49.0' ===")
+          for c in ctx_of(allt,'3.49.0',40,90,6): print("  %r"%c)
+          print("\n=== context around '2.0.0' (plugin) ===")
+          for c in ctx_of(allt,'OpenListPlugin={version',20,120,3): print("  %r"%c)
+          print("\n=== 'VERSION=' context ===")
+          for c in ctx_of(allt,'VERSION=',30,80,5): print("  %r"%c)
 
-          jst=alljs.decode('utf-8','replace')
-          print("\n===== TOTAL JS = %d bytes, %d files =====" % (len(jst), len(jsmap)))
-
-          # 1) any semver anywhere
-          semvers=set(re.findall(r'\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?\b', jst))
-          print("SEMVERS(%d): %s" % (len(semvers), sorted(semvers)))
-
-          # 2) "OpenList" / brand + nearby context
-          for brand in ['OpenList','openlist','AList','alist','oplist','Oplist']:
-              idxs=[m.start() for m in re.finditer(re.escape(brand), jst)]
-              if idxs:
-                  print("\n[brand %s] count=%d" % (brand,len(idxs)))
-                  for i in idxs[:6]:
-                      print("   ...%s..." % jst[max(0,i-50):i+60].replace('\n',' '))
-
-          # 3) import.meta.env / define injected version
-          for pat in [r'import\.meta\.env\.[A-Z_]+', r'process\.env\.[A-Z_]+', r'__VERSION__', r'__OPENLIST[A-Z_]*__', r'VERSION\s*[=:]', r'APP_VERSION', r'BUILD_VERSION']:
-              ms=set(re.findall(pat, jst))
+          # About-page mechanism: search for 'About' + version, and how app version is obtained
+          print("\n=== 'about' / 'About' near version ===")
+          for m in re.finditer(r'.{0,40}(?:about|About|鍏充簬).{0,40}version.{0,40}', allt, re.I):
+              print("  %r"%m.group(0)[:140])
+          # grep for getversion / app version fetch
+          for kw in ['getVersion','appVersion','versionInfo','fetchVersion','/api/version','version:import.meta','import.meta.env','buildVersion','app_version','site_version']:
+              ms=ctx_of(allt, kw, 20, 60, 2)
               if ms:
-                  print("\n[%s] -> %s" % (pat, sorted(ms)[:20]))
+                  print("  [%s]: %s" % (kw, ms))
 
-          # 4) about-page style version rendering: look for "Version" label text
-          for m in re.finditer(r'(?:Version|version)\D{0,20}([\w.\-]{3,30})', jst):
-              seg=m.group(0)
-              if re.search(r'\d', m.group(1)):
-                  print("  version-label-ish: %r" % seg[:80])
+          # The OpenList 'About' page in frontend typically references a constant like
+          # const version = "x.y.z" OR reads from backend. Search for t.version assignments in About components
+          print("\n=== explicit version constants (X.Y.Z inside backticks near 'version') ===")
+          for m in re.finditer(r'(?:version|Version|VERSION)\D{0,12}?[`"\'](\d+\.\d+\.\d+(?:[-+][^`"\']+)?)[`"\']', allt):
+              print("  %r" % allt[max(0,m.start()-30):m.end()+10].replace('\n',' '))
 
-          print("\n===== DONE =====")
+          # any 4-segment or 'v' prefixed version like v4.0.0, v3.x
+          print("\n=== 'vX.Y.Z' literals ===")
+          for m in re.finditer(r'v\d+\.\d+\.\d+', allt):
+              print("  %r"%allt[max(0,m.start()-20):m.end()+10].replace('\n',' '))
+          print("\nDONE")
           PYEOF
