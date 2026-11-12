@@ -1,0 +1,100 @@
+name: openlist-register-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'OpenList base URL'
+        required: false
+        default: 'https://pan.yazinb.icu'
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ github.event.inputs.target }}
+    steps:
+      - name: register new account, inspect raw resp + login + perms
+        run: |
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, base64, re, random, string, os, time
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE=os.environ['BASE']
+          def call(method, path, body=None, token=None):
+              url=BASE+path; data=None
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json','Content-Type':'application/json','Origin':BASE,'Referer':BASE+'/'}
+              if token: h['Authorization']=token
+              if body is not None: data=json.dumps(body).encode()
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=25, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return -1, {}, ('ERR:'+repr(e)).encode()
+          def jd(b):
+              try: return json.loads(b.decode('utf-8','replace'))
+              except: return None
+          def decode_jwt(tok):
+              try:
+                  p=tok.split('.')[1]; p+='='*(-len(p)%4)
+                  return json.loads(base64.urlsafe_b64decode(p))
+              except: return {}
+
+          # 1) public settings: is signup enabled?
+          print("=== PUBLIC SETTINGS ===")
+          s,h,b=call('GET','/api/public/settings')
+          d=jd(b)
+          print("status=%s" % s)
+          if d:
+              data=d.get('data',{})
+              keys=['signup_disabled','login_captcha','register_captcha','forget_captcha','captcha','AllowIndex','allow_register']
+              for k in keys:
+                  if k in data: print("  setting %s = %r" % (k, data[k]))
+              print("  raw_data_keys=%s" % list(data.keys()))
+          else:
+              print("  raw_body=%r" % b[:300])
+
+          # 2) raw register response (full bytes)
+          rnd=''.join(random.choices(string.ascii_lowercase+string.digits, k=10))
+          newuser='probe_'+rnd
+          newpass='ProbePass#'+rnd
+          print("=== REGISTER user=%s ===" % newuser)
+          s,h,b=call('POST','/api/auth/register', body={'username':newuser,'password':newpass,'email':newuser+'@example.com','code':''})
+          print("register_status=%s" % s)
+          print("register_headers=%s" % json.dumps(h, ensure_ascii=False))
+          print("register_raw_body_hexlen=%d" % len(b))
+          print("register_raw_body=%r" % b[:500])
+          d=jd(b)
+          print("register_parsed=%s" % json.dumps(d, ensure_ascii=False)[:500])
+
+          time.sleep(1)
+          # 3) login with the freshly registered account
+          print("=== LOGIN new account ===")
+          s,h,b=call('POST','/api/auth/login', body={'username':newuser,'password':newpass})
+          d=jd(b)
+          print("login_status=%s parsed=%s" % (s, json.dumps(d, ensure_ascii=False)[:400]))
+          tok=None
+          if d and d.get('code')==200 and d.get('data',{}).get('token'):
+              tok=d['data']['token']
+              print("newuser_jwt_payload=%s" % json.dumps(decode_jwt(tok), ensure_ascii=False))
+              print("=== /api/me for new account ===")
+              s2,h2,b2=call('GET','/api/me', token=tok)
+              d2=jd(b2)
+              print("me=%s" % json.dumps(d2, ensure_ascii=False)[:600])
+              print("=== probe admin storage list (perm check) ===")
+              s3,h3,b3=call('GET','/api/admin/storage/list', token=tok)
+              print("admin_storage_list_status=%s" % s3)
+              print("admin_storage_list_body=%s" % json.dumps(jd(b3), ensure_ascii=False)[:400])
+              print("=== probe add-storage mount endpoint reachability ===")
+              s4,h4,b4=call('GET','/api/admin/storage/get?path=/', token=tok)
+              print("storage_get_status=%s body=%s" % (s4, json.dumps(jd(b4), ensure_ascii=False)[:300]))
+              print("=== probe offline-download endpoint reachability ===")
+              for ep in ['/api/admin/task/info','/api/fs/other','/api/admin/task']:
+                  s5,h5,b5=call('GET', ep, token=tok)
+                  print("  %s status=%s body=%s" % (ep, s5, json.dumps(jd(b5), ensure_ascii=False)[:200]))
+          else:
+              print("NEW ACCOUNT LOGIN FAILED -> self-registration did not yield usable creds")
+          print("=== DONE ===")
+          PYEOF
