@@ -20,7 +20,7 @@ jobs:
       - name: Enumerate version-leak endpoints (guest + unauth)
         run: |
           python3 - <<'PYEOF'
-          import urllib.request, ssl, json, re
+          import urllib.request, ssl, json, re, os
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           base=os.environ['BASE'].rstrip('/')
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
