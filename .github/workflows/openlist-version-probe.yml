@@ -17,10 +17,10 @@ jobs:
     env:
       BASE: ${{ github.event.inputs.target }}
     steps:
-      - name: OpenList version probe v5 (context + about + entries)
+      - name: OpenList version source v6 (trace About->endpoint)
         run: |
           python3 - <<'PYEOF'
-          import urllib.request, ssl, re, os, json
+          import urllib.request, ssl, re, os
           ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
           base=os.environ['BASE'].rstrip('/')
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -31,51 +31,54 @@ jobs:
                   return r.status, r.read()
               except urllib.error.HTTPError as e:
                   return e.code, e.read()
-          def ctx_of(text, kw, before=60, after=80, limit=8):
-              out=[]
-              for m in re.finditer(re.escape(kw), text):
-                  out.append(text[max(0,m.start()-before):m.start()+after].replace('\n',' '))
-                  if len(out)>=limit: break
-              return out
 
-          # fetch entry + libs
-          chunks={'index':'/assets/index-PvGPvlUv.js','lib':'/assets/lib-fvlc89Ul.js',
-                  'store':'/assets/store-BxFvGRq4.js','tb':'/assets/tb-RbDNyT4E.js',
-                  'components':'/assets/components-CV7_am9F.js'}
-          txts={}
-          for name,url in chunks.items():
-              s,b=fetch(url)
-              txts[name]=b.decode('utf-8','replace')
-              print("FETCHED %s status=%s len=%d" % (url,s,len(b)))
+          # The About component usually lives in components chunk. Fetch it.
+          s,b=fetch('/assets/components-CV7_am9F.js')
+          allt=b.decode('utf-8','replace')
+          print("components len=",len(b))
 
-          allt='\n'.join(txts.values())
+          # Find how 'version' is obtained in an About-like context:
+          # typical: getSetting('version') or api.get('/api/...') then .version
+          # Search for 'version' near API call patterns
+          print("\n=== 'version' near api/request calls ===")
+          for m in re.finditer(r'.{0,30}(?:api|axios|request|get|fetch)\(.{0,60}version.{0,30}', allt, re.I):
+              print("  %r"%m.group(0)[:160])
+          # Search for a literal endpoint string followed later by version use
+          print("\n=== endpoints referencing version in path/query ===")
+          for m in re.finditer(r'`(/[^`]*version[^`]*)', allt):
+              print("  %r"%m.group(1)[:120])
+          for m in re.finditer(r'"/([^"]*version[^"]*)"', allt):
+              print("  %r"%m.group(1)[:120])
+          for m in re.finditer(r"'(/[^']*version[^']*)'", allt):
+              print("  %r"%m.group(1)[:120])
 
-          print("\n=== context around '3.49.0' ===")
-          for c in ctx_of(allt,'3.49.0',40,90,6): print("  %r"%c)
-          print("\n=== context around '2.0.0' (plugin) ===")
-          for c in ctx_of(allt,'OpenListPlugin={version',20,120,3): print("  %r"%c)
-          print("\n=== 'VERSION=' context ===")
-          for c in ctx_of(allt,'VERSION=',30,80,5): print("  %r"%c)
+          # The OpenList About page often uses getSetting('version') from public settings.
+          print("\n=== 'version' as getSetting/getSettingByKey arg ===")
+          for m in re.finditer(r'(?:getSetting|getSystemSetting|getSettingByKey)\([^)]*version[^)]*\)', allt, re.I):
+              print("  %r"%m.group(0)[:160])
+          # broad: version used as object key in a request/data object
+          print("\n=== 'version:' in request/data objects ===")
+          cnt=0
+          for m in re.finditer(r'\{[^}]{0,40}version:[^}]{0,40}\}', allt):
+              print("  %r"%m.group(0)[:160]); cnt+=1
+              if cnt>=10: break
 
-          # About-page mechanism: search for 'About' + version, and how app version is obtained
-          print("\n=== 'about' / 'About' near version ===")
-          for m in re.finditer(r'.{0,40}(?:about|About|鍏充簬).{0,40}version.{0,40}', allt, re.I):
-              print("  %r"%m.group(0)[:140])
-          # grep for getversion / app version fetch
-          for kw in ['getVersion','appVersion','versionInfo','fetchVersion','/api/version','version:import.meta','import.meta.env','buildVersion','app_version','site_version']:
-              ms=ctx_of(allt, kw, 20, 60, 2)
-              if ms:
-                  print("  [%s]: %s" % (kw, ms))
+          # Also check for '/api/version' exact string anywhere (maybe with different casing built dynamically)
+          print("\n=== '/api/version' exact ===")
+          print("  found:", '/api/version' in allt)
 
-          # The OpenList 'About' page in frontend typically references a constant like
-          # const version = "x.y.z" OR reads from backend. Search for t.version assignments in About components
-          print("\n=== explicit version constants (X.Y.Z inside backticks near 'version') ===")
-          for m in re.finditer(r'(?:version|Version|VERSION)\D{0,12}?[`"\'](\d+\.\d+\.\d+(?:[-+][^`"\']+)?)[`"\']', allt):
-              print("  %r" % allt[max(0,m.start()-30):m.end()+10].replace('\n',' '))
-
-          # any 4-segment or 'v' prefixed version like v4.0.0, v3.x
-          print("\n=== 'vX.Y.Z' literals ===")
-          for m in re.finditer(r'v\d+\.\d+\.\d+', allt):
-              print("  %r"%allt[max(0,m.start()-20):m.end()+10].replace('\n',' '))
+          # Now probe a battery of candidate backend version endpoints (GET, anon)
+          print("\n=== PROBE backend endpoints ===")
+          cands=['/api/version','/api/version/','/api/admin/version','/api/admin/setting/version',
+                 '/api/public/version','/api/setting/version','/api/about','/api/public/about',
+                 '/api/meta','/api/public/meta','/api/build','/version.json','/api/info',
+                 '/api/system/version','/api/me/version']
+          for ep in cands:
+              s2,b2=fetch(ep)
+              bo=b2.decode('utf-8','replace')
+              if bo and 'doctype' not in bo.lower() and '<html' not in bo.lower():
+                  print("  %-32s -> %s : %s" % (ep, s2, bo[:200]))
+              else:
+                  print("  %-32s -> %s (html/fallback)" % (ep, s2))
           print("\nDONE")
           PYEOF
