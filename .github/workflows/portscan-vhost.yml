@@ -1,0 +1,195 @@
+name: target-portscan-vhost
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target IP to scan'
+        required: false
+        default: '119.28.135.153'
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install nmap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nmap
+
+      - name: Full TCP port scan + service/version detection
+        run: |
+          set -e
+          T="${{ github.event.inputs.target }}"
+          mkdir -p out
+          echo "TARGET=$T"
+          # Full 1-65535 SYN scan with version detection on open ports
+          nmap -Pn -n -T4 -sS -sV --version-intensity 4 -p 1-65535 \
+               --reason --open -oX out/nmap.xml -oG out/nmap.gnmap "$T"
+          echo "=== OPEN PORTS (nmap grepable) ==="
+          grep -E "^(#|Host)" out/nmap.gnmap || true
+          grep -v "^#" out/nmap.gnmap | awk -F'\t' 'NF>0{print}' || true
+          echo "=== OPEN PORTS (parsed) ==="
+          cat out/nmap.gnmap | grep -oP 'Ports: .*' || true
+
+      - name: :443 host/SNI virtual-host enumeration + TLS cert
+        run: |
+          set -e
+          T="${{ github.event.inputs.target }}"
+          mkdir -p out
+          python3 - <<'PYEOF'
+          import socket, ssl, subprocess, json, re, sys, time
+          from urllib.parse import urlparse
+          T = "${{ github.event.inputs.target }}"
+
+          known = ["yazinb.icu", "pan.yazinb.icu", "www.yazinb.icu", "api.yazinb.icu",
+                   "admin.yazinb.icu", "console.yazinb.icu", "m.yazinb.icu", "mail.yazinb.icu",
+                   "dev.yazinb.icu", "test.yazinb.icu", "internal.yazinb.icu", "vpn.yazinb.icu",
+                   "cdn.yazinb.icu", "git.yazinb.icu", "blog.yazinb.icu", "open.yazinb.icu",
+                   "openlist.yazinb.icu", "file.yazinb.icu", "dl.yazinb.icu", "ftp.yazinb.icu",
+                   "grafana.yazinb.icu", "jenkins.yazinb.icu", "node.yazinb.icu",
+                   "boss.yazinb.icu", "web.yazinb.icu", "cloud.yazinb.icu", "vps.yazinb.icu"]
+          candidates = known
+
+          def get_cert_san(host):
+              try:
+                  ctx = ssl.create_default_context()
+                  ctx.check_hostname = False
+                  ctx.verify_mode = ssl.CERT_NONE
+                  with socket.create_connection((T, 443), timeout=10) as s:
+                      with ctx.wrap_socket(s, server_hostname=host) as ss:
+                          cert = ss.getpeercert(binary_form=False)
+                      san = cert.get('subjectAltName', [])
+                          return san
+              except Exception as e:
+                  return [("ERR", str(e))]
+
+          print("=== Default cert SANs (SNI=%s) ===" % T)
+          for t in get_cert_san(T):
+              print("  SAN", t)
+
+          # Try SNI per known hostname, capture cert + HTTP response diff
+          results = []
+          base_status = None
+          base_len = None
+          for h in candidates:
+              try:
+                  ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+                  with socket.create_connection((T,443), timeout=10) as s:
+                      with ctx.wrap_socket(s, server_hostname=h) as ss:
+                          cert = ss.getpeercert(binary_form=False)
+                  san = cert.get('subjectAltName', [])
+                  # HTTP GET over TLS with Host header
+                  try:
+                      conn = ssl.create_default_context(); conn.check_hostname=False; conn.verify_mode=ssl.CERT_NONE
+                      with socket.create_connection((T,443), timeout=10) as s2:
+                          with conn.wrap_socket(s2, server_hostname=h) as ss:
+                              req = "GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n" % h
+                              ss.sendall(req.encode())
+                              resp = b""
+                              while True:
+                                  d = ss.recv(4096)
+                                  if not d: break
+                                  resp += d
+                      resp_s = resp.decode('utf-8','replace')
+                      m = re.search(r'HTTP/\d\.\d (\d+)', resp_s)
+                      status = m.group(1) if m else "?"
+                      title_m = re.search(r'<title>(.*?)</title>', resp_s, re.I|re.S)
+                      title = title_m.group(1).strip()[:80] if title_m else ""
+                      clen = len(resp)
+                      results.append((h, status, clen, title, str(san)[:120]))
+                      if h == "yazinb.icu":
+                          base_status, base_len = status, clen
+                  except Exception as e:
+                      results.append((h, "SSL_ONLY", 0, "", "sslerr:%s" % str(e)[:80]))
+              except Exception as e:
+                  results.append((h, "FAIL", 0, "", "err:%s" % str(e)[:80]))
+
+          print("\n=== HTTPS vhost responses (Host/SNI header) ===")
+          for h, st, ln, ti, san in results:
+              print("  %-28s status=%s len=%d title=%r cert=%s" % (h, st, ln, ti, san))
+
+          # Flag hosts that differ from default yazinb.icu
+          print("\n=== DIFF vhosts (differ from base yazinb.icu) ===")
+          diff = False
+          for h, st, ln, ti, san in results:
+              if h in ("yazinb.icu","pan.yazinb.icu"): continue
+              if st not in ("FAIL",) and (base_status is None or ln != base_len or st != base_status):
+                  print("  DIFF %-28s status=%s len=%d title=%r" % (h, st, ln, ti))
+                  diff = True
+          if not diff:
+              print("  (no response-level diffs detected; all candidates returned same as base or failed)")
+
+          with open('out/vhost443.txt','w',encoding='utf-8',errors='replace') as f:
+              for h, st, ln, ti, san in results:
+                  f.write("%s\t%s\t%d\t%s\t%s\n" % (h, st, ln, ti, san))
+          PYEOF
+
+      - name: :80 vhost enumeration (Host header)
+        run: |
+          set -e
+          T="${{ github.event.inputs.target }}"
+          mkdir -p out
+          python3 - <<'PYEOF'
+          import socket, re
+          T = "${{ github.event.inputs.target }}"
+          cands = ["yazinb.icu","pan.yazinb.icu","www.yazinb.icu","admin.yazinb.icu","api.yazinb.icu",
+                   "console.yazinb.icu","dev.yazinb.icu","test.yazinb.icu","internal.yazinb.icu",
+                   "open.yazinb.icu","openlist.yazinb.icu","file.yazinb.icu","dl.yazinb.icu",
+                   "git.yazinb.icu","jenkins.yazinb.icu","grafana.yazinb.icu","boss.yazinb.icu",
+                   "cloud.yazinb.icu","web.yazinb.icu","vpn.yazinb.icu","m.yazinb.icu"]
+          base=None
+          print("=== HTTP :80 vhost responses ===")
+          for h in cands:
+              try:
+                  with socket.create_connection((T,80), timeout=10) as s:
+                      req="GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"%h
+                      s.sendall(req.encode())
+                      resp=b""
+                      while True:
+                          d=s.recv(4096)
+                          if not d: break
+                          resp+=d
+                  rs=resp.decode('utf-8','replace')
+                  m=re.search(r'HTTP/\d\.\d (\d+)', rs)
+                  st=m.group(1) if m else "?"
+                  tm=re.search(r'<title>(.*?)</title>', rs, re.I|re.S)
+                  ti=tm.group(1).strip()[:80] if tm else ""
+                  print("  %-28s status=%s len=%d title=%r"%(h,st,len(resp),ti))
+                  if h=="yazinb.icu": base=(st,len(resp))
+              except Exception as e:
+                  print("  %-28s ERR %s"%(h,str(e)[:60]))
+          with open('out/vhost80.txt','w',encoding='utf-8',errors='replace') as f:
+              for h in cands:
+                  f.write(h+"\n")
+          PYEOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-portscan-vhost
+          path: out/
+          if-no-files-found: warn
+
+      - name: Publish results to issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          {
+            echo "# Port scan + vhost enum for ${{ github.event.inputs.target }} (GitHub Actions relay)"
+            echo ""
+            echo "## Open ports (nmap -p 1-65535 -sS -sV)"
+            grep -v "^#" out/nmap.gnmap | grep -oP 'Ports: .*' || true
+            echo ""
+            echo "## :443 vhost table"
+            cat out/vhost443.txt
+            echo ""
+            echo "## :80 vhost table (hosts)"
+            cat out/vhost80.txt
+          } > report.md
+          gh issue create --title "portscan+vhost ${{ github.event.inputs.target }}" --body "$(cat report.md)" || true
