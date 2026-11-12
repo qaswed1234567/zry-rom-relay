@@ -1,0 +1,73 @@
+name: zry-api-probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe real rom web-api endpoints from GH cloud network
+        run: |
+          set -e
+          mkdir -p out2
+          python3 - <<'PYEOF'
+          import urllib.request, ssl, json, os
+          ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          BASE='https://zryflash.cn'
+          def call(method, path, body=None, headers=None):
+              url=BASE+path
+              data=None
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json','Origin':'https://zryflash.cn','Referer':'https://zryflash.cn/rom/'}
+              if headers: h.update(headers)
+              if body is not None:
+                  data=json.dumps(body).encode(); h['Content-Type']='application/json'
+              req=urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  r=urllib.request.urlopen(req, timeout=30, context=ctx)
+                  return r.status, dict(r.getheaders()), r.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, dict(e.headers), e.read()
+              except Exception as e:
+                  return None, {'error':str(e)}, b''
+          def save(name, status, headers, body):
+              with open('out2/%s.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                  f.write('STATUS %s\n'%status)
+                  for k,v in headers.items(): f.write('%s: %s\n'%(k,v))
+              try:
+                  txt=body.decode('utf-8')
+                  json.loads(txt); isjson=True
+              except Exception:
+                  txt=body.decode('utf-8','replace'); isjson=False
+              with open('out2/%s.body.txt'%name,'w',encoding='utf-8',errors='replace') as f:
+                  f.write(txt[:20000])
+              print('%-28s status=%s json=%s len=%d'%(name,status,isjson,len(body)))
+          # token (no human)
+          save('api_token', *call('GET','/web-api/rom/token'))
+          # meta
+          save('api_meta', *call('GET','/web-api/rom/meta'))
+          # models
+          save('api_models', *call('GET','/web-api/rom/models?view=cards'))
+          # captcha
+          save('api_captcha', *call('GET','/web-api/rom/captcha'))
+          # link (needs human - expect 403 needHuman)
+          save('api_link', *call('POST','/web-api/rom/link', body={'id':'probe','brand':'小米'}))
+          # verify (malformed - expect reject)
+          save('api_verify', *call('POST','/web-api/rom/verify', body={'id':'x','offset':0,'duration':100,'points':[],'trusted':False}))
+          PYEOF
+          echo "=== SUMMARY ==="; ls -la out2/
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zry-api-probe
+          path: out2/
+          if-no-files-found: warn
+      - name: Comment results on relay issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment 1 --body "$(ls -la out2/ | sed 's/^/    /')" || true
