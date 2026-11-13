@@ -1,0 +1,35 @@
+name: duck-guide-confirm
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'base url'
+        required: false
+        default: 'https://yazinb.icu'
+permissions:
+  contents: write
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Focused confirm of /svc/admin/guide 501 vs 403 (spaced to avoid per-IP block)
+        run: |
+          set +e
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          EP="/svc/admin/guide"
+          full() {
+            local method="$1"; local ct="$2"; local data="$3"; shift 3
+            local -a hargs=("$@")
+            echo "===== [$method $EP CT=$ct hdr=${hargs[*]}] ====="
+            curl -sk -A "$UA" -X "$method" -H "Content-Type:$ct" "${hargs[@]}" --data "$data" --max-time 25 -w $'\n__CODE__%{http_code}__LEN__%{size_download}\n' "$BASE$EP" 2>/dev/null | head -c 700
+            echo
+          }
+          sleep 2; full GET  "application/json" "{}"
+          sleep 4; full POST "application/json" "{}"                       # no key carrier -> expect 501 proxy
+          sleep 4; full POST "application/json" "{}" "-H" "X-Admin-Key: dummy"   # key carrier -> expect 403 app
+          sleep 4; full POST "application/x-www-form-urlencoded" "key=dummy" "-H" "X-Admin-Key: "
+          sleep 4; full POST "multipart/form-data; boundary=x" "--x" "-H" "X-Admin-Key: "
+          sleep 4; full PUT  "application/json" "{}"
+          sleep 4; full OPTIONS "application/json" "{}"
+          echo "===== DONE confirm ====="
