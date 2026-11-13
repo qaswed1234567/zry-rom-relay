@@ -1,0 +1,51 @@
+name: duck-svc-audit
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'base url'
+        required: false
+        default: 'https://yazinb.icu'
+permissions:
+  contents: write
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enumerate /svc/ surface and auth bypass probes
+        run: |
+          set -e
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          echo "my egress IP: $(curl -s --max-time 10 https://api.ipify.org)"
+          mkdir -p out
+          # 1) Fetch frontend index and any linked JS to harvest /svc/ paths from client
+          curl -sk -A "$UA" -o out/index.html "$BASE/" || true
+          echo "===== client-side /svc/ /api/ path harvest ====="
+          grep -roiE "(/svc/[a-zA-Z0-9_./-]+|/api/[a-zA-Z0-9_./-]+)" out/index.html 2>/dev/null | sort -u | tee out/svc_paths.txt || true
+          # 2) Define a candidate /svc endpoint list (known + derived)
+          EPS="/svc/admin/key /svc/admin/guide /svc/admin/guides /svc/admin/sysinfo /svc/admin/stats /svc/admin/trend /svc/admin/logs /svc/admin/users /svc/admin/user /svc/admin/bulk /svc/admin/sessions /svc/admin/session /svc/admin/flashes /svc/me /svc/logout /svc/login /svc/key /svc/auth /svc/status /svc/health /svc/admin /svc/admin/config /svc/admin/setting /svc/admin/settings /svc/upload /svc/file /svc/files /svc/user /svc/users /svc/version /svc/info /svc/config /svc/guide /svc/guides /svc/license /svc/check /svc/ping /svc/root /svc/exec /svc/run /svc/cmd /svc/shell /svc/system /svc/admin/system /svc/admin/upload /svc/admin/file /svc/admin/exec /svc/admin/run /svc/admin/cmd"
+          echo "===== probe each endpoint: UNAUTH (no key) + with empty/guessed key headers ====="
+          for ep in $EPS; do
+            url="$BASE$ep"
+            # unauth GET
+            code=$(curl -s -o /dev/null -w "%{http_code}" -A "$UA" --max-time 20 "$url")
+            # unauth POST empty body
+            codeP=$(curl -s -o /dev/null -w "%{http_code}" -A "$UA" -X POST -H "Content-Type: application/json" --data '{}' --max-time 20 "$url")
+            # POST with guessed key header (ascii)
+            codeK=$(curl -s -o /dev/null -w "%{http_code}" -A "$UA" -X POST -H "Content-Type: application/json" -H "X-Admin-Key: admin" -H "Authorization: Bearer admin" --data '{}' --max-time 20 "$url")
+            echo "[$ep] GET=$code POST=$codeP POST+keyhdr=$codeK"
+          done | tee out/probe.txt
+          echo "===== save response bodies for a few interesting unauth ones ====="
+          for ep in /svc/status /svc/health /svc/version /svc/info /svc/me /svc/config /svc/admin/sysinfo /svc/admin/key; do
+            echo "----- GET $ep -----" >> out/bodies.txt
+            curl -sk -A "$UA" --max-time 20 "$BASE$ep" >> out/bodies.txt 2>&1 || true
+            echo "" >> out/bodies.txt
+          done
+          echo "===== DONE ====="
+      - name: Upload capture
+        uses: actions/upload-artifact@v4
+        with:
+          name: duck-svc-audit
+          path: out/
+          if-no-files-found: warn
