@@ -1,0 +1,75 @@
+name: duck-guide-fuzz
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'base url'
+        required: false
+        default: 'https://yazinb.icu'
+permissions:
+  contents: write
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deep fuzz /svc/admin/guide 501 anomaly
+        run: |
+          set +e
+          set +u
+          BASE="${{ github.event.inputs.target }}"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          EP="/svc/admin/guide"
+          METHODS="GET POST PUT DELETE PATCH OPTIONS HEAD"
+          CTS="application/json application/x-www-form-urlencoded multipart/form-data text/plain "
+
+          probe() {
+            local method="$1" ep="$2" ct="$3" data="$4"; shift 4
+            local -a hargs=("$@")
+            local out code body
+            if [ -n "$ct" ]; then hargs=("-H" "Content-Type:$ct" "${hargs[@]}"); fi
+            out=$(curl -sk -A "$UA" -X "$method" "${hargs[@]}" --data "$data" --max-time 25 -w $'\n__CODE__%{http_code}__LEN__%{size_download}' "$BASE$ep" 2>/dev/null)
+            code=$(printf '%s' "$out" | grep -oE '__CODE__[0-9]+__LEN__[0-9]+' | head -1)
+            body=$(printf '%s' "$out" | sed '/__CODE__[0-9]*__LEN__[0-9]*/d')
+            printf '[%s %s CT=%s hdr=%s] %s\n  body: %.180s\n' "$method" "$ep" "${ct:-none}" "${hargs[*]:-none}" "$code" "$body"
+          }
+
+          echo "########## 1. METHOD x NO-AUTH (json {}) ##########"
+          for m in $METHODS; do probe "$m" "$EP" "application/json" "{}"; done
+
+          echo "########## 2. METHOD x X-Admin-Key: (blank) ##########"
+          for m in $METHODS; do probe "$m" "$EP" "application/json" "{}" "-H" "X-Admin-Key: "; done
+
+          echo "########## 3. METHOD x X-Admin-Key: dummy ##########"
+          for m in $METHODS; do probe "$m" "$EP" "application/json" "{}" "-H" "X-Admin-Key: dummy"; done
+
+          echo "########## 4. POST content-types x X-Admin-Key: (blank) ##########"
+          for ct in $CTS; do probe "POST" "$EP" "$ct" "{}" "-H" "X-Admin-Key: "; done
+
+          echo "########## 5. key location variants (POST json) ##########"
+          probe "POST" "$EP" "application/json" '{"key":"dummy"}' ""
+          probe "POST" "$EP" "application/json" '{"key":""}' ""
+          probe "POST" "$EP" "application/json" '{"key":null}' ""
+          probe "POST" "$EP" "application/x-www-form-urlencoded" "key=dummy" "-H" "X-Admin-Key: "
+          probe "POST" "$EP" "application/x-www-form-urlencoded" "key=" "-H" "X-Admin-Key: "
+          probe "POST" "$EP" "application/json" "{}" "-H" "Authorization: Bearer dummy"
+          probe "POST" "$EP" "application/json" "{}" "-H" "Authorization: Bearer "
+
+          echo "########## 6. key HEADER NAME variants (POST json + dummy) ##########"
+          for h in "X-Admin-Key" "X-AdminKey" "admin-key" "Admin-Key" "x-api-key" "X-API-Key" "X-Management-Key" "X-Auth-Key"; do
+            probe "POST" "$EP" "application/json" "{}" "-H" "$h: dummy"
+          done
+
+          echo "########## 7. BOUNDARY PATHS (POST + X-Admin-Key: blank) ##########"
+          for p in "/svc/admin/guide" "/svc/admin/guide/" "/svc/admin/guide/." "/svc/admin/guide?x=1" "/svc/admin/guide//" "/Svc/Admin/Guide" "//svc/admin/guide" "/svc/admin/guide/../guide" "/svc/Admin/Guide"; do
+            probe "POST" "$p" "application/json" "{}" "-H" "X-Admin-Key: "
+          done
+
+          echo "########## 8. 501 body inspection (POST + X-Admin-Key: blank, full) ##########"
+          curl -sk -A "$UA" -X POST -H "Content-Type: application/json" -H "X-Admin-Key: " --data "{}" --max-time 25 "$BASE/svc/admin/guide" | head -c 800
+          echo
+          echo "########## 9. body-shape variants on 501 path (POST + X-Admin-Key: blank) ##########"
+          probe "POST" "$EP" "application/json" '{"name":"x","brand":"y"}' "-H" "X-Admin-Key: "
+          probe "POST" "$EP" "application/json" '{"id":1}' "-H" "X-Admin-Key: "
+          probe "POST" "$EP" "application/json" 'garbage-not-json' "-H" "X-Admin-Key: "
+          probe "POST" "$EP" "application/json" '{"name":"..\/..\/etc"}' "-H" "X-Admin-Key: "
+          echo "########## DONE ##########"
